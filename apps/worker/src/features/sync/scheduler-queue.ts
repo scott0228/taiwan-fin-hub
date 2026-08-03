@@ -1,5 +1,7 @@
 import type { Env, ScheduledSyncQueueMessage } from "../../platform/env";
 import { runSchedulerTick } from "./scheduler";
+import { runTdccTradesFollowUp } from "./tdcc-trades";
+import { enqueueTdccTradesSync } from "./tdcc-trades-queue";
 
 const queueController = {
   cron: "queue:scheduled-sync",
@@ -21,6 +23,19 @@ export async function consumeScheduledSyncQueue(
   env: Env,
 ) {
   for (const message of batch.messages) {
+    if (message.body.type === "run-tdcc-trades") {
+      const result = await runTdccTradesFollowUp(
+        env,
+        message.body.trigger,
+        message.body.attempt ?? 1,
+      );
+      if (result.requeue) {
+        await enqueueTdccTradesSync(env, message.body.trigger, result.attempt);
+      }
+      message.ack();
+      continue;
+    }
+
     if (message.body.type !== "run-next-scheduled-sync") {
       console.error(
         JSON.stringify({

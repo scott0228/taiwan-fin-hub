@@ -79,7 +79,9 @@ export const tdccConfigSchema = z.object({
   otp: z.string().min(1).optional(),
   otpChannel: z.enum(["email", "sms"]).optional(),
   requestOtp: z.boolean().default(true),
-  tradeHistoryMaxPages: z.number().int().min(1).max(100).default(20),
+  // Keeps a single trades invocation within the Workers free-plan budget of
+  // 50 external subrequests; the queue follow-up chain resumes the backfill.
+  tradeHistoryMaxPages: z.number().int().min(1).max(100).default(10),
 });
 
 export type TdccConfig = z.infer<typeof tdccConfigSchema>;

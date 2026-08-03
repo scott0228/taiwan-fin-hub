@@ -78,7 +78,9 @@ import {
   serializePublicConnectorConfig,
   sensitiveConnectorConfig,
   splitConnectorCursorState,
+  tdccTradeBackfillIncomplete,
 } from "./connector-state";
+import { enqueueTdccTradesSync } from "./tdcc-trades-queue";
 
 export type SyncScope =
   | "all"
@@ -103,6 +105,8 @@ export type SyncOutcome = {
   records: number;
   cursorUpdated: boolean;
   detailRecords?: number;
+  backfillIncomplete?: boolean;
+  tradesQueued?: boolean;
 };
 
 export class SyncAlreadyRunningError extends Error {
@@ -919,8 +923,12 @@ export async function syncTdcc(
   const scope = tdccOutcomeScope(selected);
   let records = 0;
   let cursorUpdated = false;
+  let backfillIncomplete: boolean | undefined;
+  let tradesQueued: boolean | undefined;
 
-  if (selected.has(TDCC_SCOPE_INVESTMENTS) || selected.has(TDCC_SCOPE_BANK)) {
+  const runsHoldings =
+    selected.has(TDCC_SCOPE_INVESTMENTS) || selected.has(TDCC_SCOPE_BANK);
+  if (runsHoldings) {
     const result = await syncTdccPositionsAndBank(env, trigger, overrides, {
       writeInvestments: selected.has(TDCC_SCOPE_INVESTMENTS),
       writeBank: selected.has(TDCC_SCOPE_BANK),
@@ -931,9 +939,17 @@ export async function syncTdcc(
   }
 
   if (selected.has(TDCC_SCOPE_TRADES)) {
-    const result = await syncTdccTrades(env, trigger, overrides, scope);
-    records += result.records;
-    cursorUpdated = cursorUpdated || result.cursorUpdated;
+    if (runsHoldings) {
+      // Defer the trade-history backfill to its own queue invocation so it
+      // gets a fresh Workers subrequest budget instead of sharing this one.
+      await enqueueTdccTradesSync(env, trigger);
+      tradesQueued = true;
+    } else {
+      const result = await syncTdccTrades(env, trigger, overrides, scope);
+      records += result.records;
+      cursorUpdated = cursorUpdated || result.cursorUpdated;
+      backfillIncomplete = result.backfillIncomplete;
+    }
   }
 
   return {
@@ -942,6 +958,8 @@ export async function syncTdcc(
     scope,
     records,
     cursorUpdated,
+    ...(backfillIncomplete !== undefined && { backfillIncomplete }),
+    ...(tradesQueued && { tradesQueued }),
   };
 }
 
@@ -1087,7 +1105,11 @@ async function syncTdccTrades(
   trigger: SyncTrigger,
   overrides: TdccSyncOverrides,
   scope: SyncScope,
-): Promise<{ records: number; cursorUpdated: boolean }> {
+): Promise<{
+  records: number;
+  cursorUpdated: boolean;
+  backfillIncomplete: boolean;
+}> {
   const connectorId = "tdcc";
   const settings = await requireConnectorSettings(env.DB, connectorId);
   const config = await decryptJson<unknown>(
@@ -1164,6 +1186,9 @@ async function syncTdccTrades(
     records: investmentTransactions.length,
     cursorUpdated: Boolean(
       persistedCursor && persistedCursor !== settings.sync_cursor,
+    ),
+    backfillIncomplete: tdccTradeBackfillIncomplete(
+      persistedCursor ?? settings.sync_cursor,
     ),
   };
 }

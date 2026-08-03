@@ -54,6 +54,33 @@ export function restoreConfiguredPublicFields(
   return persistedConfig;
 }
 
+export function tdccTradeBackfillIncomplete(
+  cursor: string | null | undefined,
+): boolean {
+  if (!cursor) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cursor);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return false;
+  const tradeCursors = (parsed as Record<string, unknown>).tradeCursors;
+  if (
+    !tradeCursors ||
+    typeof tradeCursors !== "object" ||
+    Array.isArray(tradeCursors)
+  )
+    return false;
+  return Object.values(tradeCursors as Record<string, unknown>).some(
+    (entry) =>
+      Boolean(entry) &&
+      typeof entry === "object" &&
+      (entry as { backfillComplete?: boolean }).backfillComplete !== true,
+  );
+}
+
 export function splitConnectorCursorState(
   connectorId: ConnectorId,
   cursor: string,

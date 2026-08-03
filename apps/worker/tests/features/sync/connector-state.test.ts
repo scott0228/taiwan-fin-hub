@@ -5,6 +5,7 @@ import {
   sensitiveConnectorConfig,
   serializePublicConnectorConfig,
   splitConnectorCursorState,
+  tdccTradeBackfillIncomplete,
 } from "../../../src/features/sync/connector-state";
 
 describe("connector state boundaries", () => {
@@ -94,5 +95,52 @@ describe("connector state boundaries", () => {
         session: { tokenId: "token", richUrl: null },
       },
     });
+  });
+});
+
+describe("tdccTradeBackfillIncomplete", () => {
+  it("reports incomplete when any account has not finished backfill", () => {
+    expect(
+      tdccTradeBackfillIncomplete(
+        JSON.stringify({
+          tradeCursors: {
+            "1234:0001": { newest: "a", oldest: "b", backfillComplete: true },
+            "5678:0002": { newest: "c", oldest: "d", backfillComplete: false },
+          },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("reports incomplete when an account cursor lacks the flag", () => {
+    expect(
+      tdccTradeBackfillIncomplete(
+        JSON.stringify({
+          tradeCursors: { "1234:0001": { newest: "a", oldest: "b" } },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("reports complete when every account finished backfill", () => {
+    expect(
+      tdccTradeBackfillIncomplete(
+        JSON.stringify({
+          tradeCursors: {
+            "1234:0001": { newest: "a", oldest: "b", backfillComplete: true },
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("treats missing, empty, or malformed cursors as complete", () => {
+    expect(tdccTradeBackfillIncomplete(undefined)).toBe(false);
+    expect(tdccTradeBackfillIncomplete(null)).toBe(false);
+    expect(tdccTradeBackfillIncomplete("not json")).toBe(false);
+    expect(tdccTradeBackfillIncomplete(JSON.stringify({}))).toBe(false);
+    expect(
+      tdccTradeBackfillIncomplete(JSON.stringify({ tradeCursors: {} })),
+    ).toBe(false);
   });
 });
