@@ -1,6 +1,9 @@
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { ensureRequiredQueues } from "./deploy-with-vapid.mjs";
+import {
+  applyRemoteMigrations,
+  ensureRequiredQueues,
+} from "./deploy-with-vapid.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const repositoryDirectory = resolve(dirname(scriptPath), "..");
@@ -15,8 +18,10 @@ if (
   isWorkersBuild()
 ) {
   console.log("[build] Preparing Cloudflare resources.");
-  await ensureRequiredQueues([
+  const contextArguments = [
     "--config",
     resolve(repositoryDirectory, "wrangler.toml"),
-  ]);
+  ];
+  await ensureRequiredQueues(contextArguments);
+  await applyRemoteMigrations(contextArguments);
 }

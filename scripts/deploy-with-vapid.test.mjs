@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ensureQueueExists } from "./deploy-with-vapid.mjs";
+import {
+  applyRemoteMigrations,
+  ensureQueueExists,
+} from "./deploy-with-vapid.mjs";
 import { isWorkersBuild } from "./prepare-cloudflare-build.mjs";
 
 const queueName = "taiwan-fin-hub-sync";
@@ -74,6 +77,39 @@ test("accepts a Queue created by a concurrent build", async () => {
   );
 
   assert.equal(calls.length, 3);
+});
+
+test("applies remote D1 migrations with context arguments", async () => {
+  const calls = [];
+  await applyRemoteMigrations(
+    ["--config", "wrangler.toml"],
+    runner([{ exitCode: 0, stdout: "✅", stderr: "" }], calls),
+  );
+
+  assert.deepEqual(
+    calls.map((call) => call.argumentsToRun),
+    [
+      [
+        "d1",
+        "migrations",
+        "apply",
+        "DB",
+        "--remote",
+        "--config",
+        "wrangler.toml",
+      ],
+    ],
+  );
+});
+
+test("reports a remote D1 migration failure", async () => {
+  await assert.rejects(
+    applyRemoteMigrations(
+      [],
+      runner([{ exitCode: 1, stdout: "", stderr: "authentication error" }], []),
+    ),
+    /Unable to apply D1 migrations.*authentication error/s,
+  );
 });
 
 test("reports a Queue creation failure", async () => {

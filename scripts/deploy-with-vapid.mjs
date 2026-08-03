@@ -216,6 +216,23 @@ export async function ensureQueueExists(
   );
 }
 
+export async function applyRemoteMigrations(
+  contextArguments = queueContextArguments(),
+  run = runWrangler,
+) {
+  console.log("[deploy] Applying remote D1 migrations.");
+  const result = await run(
+    ["d1", "migrations", "apply", "DB", "--remote", ...contextArguments],
+    { captureOutput: true },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Unable to apply D1 migrations before deployment.\n${result.stderr.trim()}`,
+    );
+  }
+  if (result.stdout.trim()) console.log(result.stdout.trim());
+}
+
 export async function ensureRequiredQueues(
   contextArguments = queueContextArguments(),
 ) {
