@@ -65,7 +65,9 @@ export async function runTdccTradesFollowUp(
       trigger,
       TDCC_SCOPE_TRADES,
     );
-    const requeue = Boolean(outcome.backfillIncomplete && outcome.cursorUpdated);
+    const requeue = Boolean(
+      outcome.backfillIncomplete && outcome.cursorUpdated,
+    );
     console.log(
       JSON.stringify({
         event: "tdcc_trades_follow_up_finished",
