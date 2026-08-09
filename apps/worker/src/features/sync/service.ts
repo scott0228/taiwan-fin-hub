@@ -64,6 +64,7 @@ import {
   connectorStateStatement,
   linkCanonicalBankAccountsStatement,
   reconcileEsunLifecycleShadowStatements,
+  reconcileEsunSingleCardSummaryAccountStatements,
   reconcileSinopacLegacyTransactionStatements,
   updateConnectorEncryptedConfig,
 } from "./repository";
@@ -446,8 +447,12 @@ export async function syncEsun(
         ? [
             linkCanonicalBankAccountsStatement(env.DB),
             ...reconcileEsunLifecycleShadowStatements(env.DB),
+            ...reconcileEsunSingleCardSummaryAccountStatements(env.DB),
           ]
-        : reconcileEsunLifecycleShadowStatements(env.DB),
+        : [
+            ...reconcileEsunLifecycleShadowStatements(env.DB),
+            ...reconcileEsunSingleCardSummaryAccountStatements(env.DB),
+          ],
     finalizeStatements,
   });
 

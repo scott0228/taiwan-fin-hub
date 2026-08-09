@@ -78,7 +78,7 @@ test("loads the responsive shell and changes primary views", async ({
     .first()
     .click();
   await expect(
-    page.getByRole("heading", { name: "資產", exact: true }),
+    page.getByRole("heading", { name: "資產清冊", exact: true }),
   ).toBeVisible();
   await expect(page).toHaveURL(/#\/assets$/);
 
@@ -400,15 +400,16 @@ test("uses app-like scrolling and history only in standalone display mode", asyn
   await page.getByRole("button", { name: "資產", exact: true }).last().click();
   await expect(page).toHaveURL(/#\/assets$/);
   await expect(
-    page.getByRole("heading", { name: "資產", exact: true }),
+    page.getByRole("heading", { name: "資產清冊", exact: true }),
   ).toBeVisible();
   expect(await page.evaluate(() => window.history.length)).toBe(historyLength);
 });
 
-test("opens a primary view from its hash route", async ({ page }) => {
+test("redirects the removed invoices route to overview", async ({ page }) => {
   await page.goto("/#/invoices");
+  await expect(page).toHaveURL(/#\/overview$/);
   await expect(
-    page.getByRole("heading", { name: "發票", exact: true }),
+    page.getByRole("heading", { name: "總覽", exact: true }),
   ).toBeVisible();
 });
 
@@ -1093,7 +1094,7 @@ test("manually maps, manages, and separates a same-day invoice transaction on mo
   await expect(page.getByText("測試飲料店").first()).toBeVisible();
 });
 
-test("loads invoice line items only after expanding an invoice", async ({
+test("loads invoice line items only after opening an activity", async ({
   page,
 }) => {
   const month = new Date().toISOString().slice(0, 7);
@@ -1132,11 +1133,14 @@ test("loads invoice line items only after expanding an invoice", async ({
     await route.fulfill({ json: [invoice] });
   });
 
-  await page.goto("/#/invoices");
-  await expect(page.getByText("延遲載入商店")).toBeVisible();
+  await page.goto("/#/activity");
+  const activity = page.getByRole("button", {
+    name: "查看 延遲載入商店 活動詳情",
+  });
+  await expect(activity).toBeVisible();
   expect(detailRequests).toBe(0);
 
-  await page.getByRole("button", { name: /延遲載入商店/ }).click();
+  await activity.click();
   await expect(page.getByText("延遲載入品項", { exact: true })).toBeVisible();
   expect(detailRequests).toBe(1);
 });
