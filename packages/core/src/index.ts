@@ -181,11 +181,58 @@ export interface SyncResponse {
   connectorId: ConnectorId;
   scope: string;
   records: number;
+  newRecords: SyncNewRecordCounts;
   detailRecords?: number;
   cursorUpdated: boolean;
 }
 
+export interface QueuedSyncResponse {
+  success: true;
+  connectorId: ConnectorId;
+  scope: string;
+  status: "queued";
+  runId: string;
+}
+
 export type SyncNotificationStatus = "success" | "failed" | "needs_user_action";
+
+export interface SyncNewRecordCounts {
+  invoices: number;
+  bankTransactions: number;
+  investmentTransactions: number;
+}
+
+export interface ScheduledSyncSourceReport {
+  connectorId: ConnectorId;
+  status: SyncNotificationStatus;
+  completedAt: string;
+  newRecords: SyncNewRecordCounts;
+}
+
+export type SyncFinancialChangeUnavailableReason =
+  "baseline" | "partial_sync" | "snapshot_unavailable";
+
+export interface ScheduledSyncReport {
+  id: string;
+  startedAt: string;
+  completedAt: string;
+  status: SyncNotificationStatus;
+  sources: ScheduledSyncSourceReport[];
+  sourceSummary: {
+    total: number;
+    success: number;
+    failed: number;
+    needsUserAction: number;
+  };
+  newRecords: SyncNewRecordCounts;
+  financialChange: {
+    assets: number;
+    creditCardDebt: number;
+    netWorth: number;
+  } | null;
+  financialChangeUnavailableReason: SyncFinancialChangeUnavailableReason | null;
+  missingCurrencies: string[];
+}
 
 export interface NotificationPreferences {
   success: boolean;
@@ -269,7 +316,7 @@ export const connectorCatalog = {
     connectionMode: "api_credentials",
     scopes: ["all"],
     capabilities: ["invoice", "invoice_line_item"],
-    publicFields: ["fetchDetails"],
+    publicFields: [],
     credentialFields: ["mobile", "password"],
     secretStateFields: [
       "userToken",

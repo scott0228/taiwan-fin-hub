@@ -1,5 +1,4 @@
 import {
-  einvoiceConnector,
   EInvoiceProtocolUnavailableError,
   createCtbcConnector,
   CtbcVerificationRequiredError,
@@ -9,7 +8,6 @@ import {
   parseCathaybkConfig,
   parseCtbcConfig,
   parseEsunConfig,
-  parseInvoiceConfig,
   parseObankConfig,
   parseSinopacConfig,
   parseTaishinConfig,
@@ -41,7 +39,7 @@ import {
   recognizeNumericCaptcha,
   recognizeValidateNumber,
 } from "../ocr/service";
-import type { ConnectorId } from "@taiwan-fin-hub/core";
+import type { ConnectorId, SyncNewRecordCounts } from "@taiwan-fin-hub/core";
 import {
   acquireSyncJobLock,
   getConnectorSettings,
@@ -57,7 +55,11 @@ import { configEncryptionKey } from "../../platform/config";
 import { encryptJson, decryptJson } from "../../platform/crypto";
 import type { Env } from "../../platform/env";
 import { dateFromIso, rebuildBankDepositHistory } from "../net-worth/service";
-import { persistStagedSyncWrite, type SyncWriteRecord } from "./persistence";
+import {
+  emptySyncNewRecordCounts,
+  persistStagedSyncWrite,
+  type SyncWriteRecord,
+} from "./persistence";
 import {
   connectorCursorStatement,
   connectorEncryptedConfigStatement,
@@ -110,6 +112,7 @@ export type SyncOutcome = {
   connectorId: ConnectorId;
   scope: SyncScope;
   records: number;
+  newRecords: SyncNewRecordCounts;
   cursorUpdated: boolean;
   detailRecords?: number;
   backfillIncomplete?: boolean;
@@ -127,10 +130,6 @@ export class NeedsUserActionError extends Error {
     super(message);
   }
 }
-
-export type EinvoiceSyncOverrides = {
-  fetchDetails?: boolean;
-};
 
 export type SinopacSyncOverrides = {
   captcha?: string;
@@ -288,90 +287,6 @@ export async function prepareObankCaptchaSession(env: Env) {
   }
 }
 
-export async function syncEinvoice(
-  env: Env,
-  trigger: SyncTrigger,
-  overrides: EinvoiceSyncOverrides = {},
-): Promise<SyncOutcome> {
-  const connectorId = "einvoice";
-  const scope = "all";
-  const settings = await requireConnectorSettings(env.DB, connectorId);
-  const stored = await decryptJson<Record<string, unknown>>(
-    settings.encrypted_config,
-    configEncryptionKey(env),
-  );
-  const config = {
-    ...stored,
-    ...parsePublicConnectorConfig(connectorId, settings.public_config),
-  };
-  const configuredConfig = parseInvoiceConfig(config);
-  const effectiveConfig = parseInvoiceConfig({
-    ...configuredConfig,
-    ...overrides,
-  });
-  console.log(
-    `[sync] ${connectorId}/${scope}: starting trigger=${trigger} (cursor=${settings.sync_cursor ? "set" : "none"})`,
-  );
-  const result = await einvoiceConnector.sync(
-    effectiveConfig,
-    settings.sync_cursor ?? undefined,
-  );
-  const invoiceLineItems = result.invoiceLineItems ?? [];
-  const detailErrorCount =
-    "detailErrorCount" in result && typeof result.detailErrorCount === "number"
-      ? result.detailErrorCount
-      : 0;
-  console.log(
-    `[sync] ${connectorId}/${scope}: fetched ${result.records.length} invoices, ${invoiceLineItems.length} detail rows` +
-      (detailErrorCount > 0 ? `, ${detailErrorCount} detail errors` : ""),
-  );
-  const now = new Date().toISOString();
-
-  const records: SyncWriteRecord[] = [
-    ...result.records.map((invoice) =>
-      invoiceRecord(connectorId, invoice, now),
-    ),
-    ...invoiceLineItems.map((item) =>
-      invoiceLineItemRecord(connectorId, item, now),
-    ),
-  ];
-  const finalizeStatements: D1PreparedStatement[] = [];
-
-  if (result.cursor) {
-    finalizeStatements.push(
-      connectorCursorStatement(env.DB, connectorId, result.cursor, now),
-    );
-  }
-
-  const persistedConfig = restoreConfiguredPublicFields(
-    connectorId,
-    effectiveConfig,
-    configuredConfig,
-  );
-  finalizeStatements.push(
-    connectorEncryptedConfigStatement(
-      env.DB,
-      connectorId,
-      await encryptConnectorConfig(env, connectorId, persistedConfig),
-      serializePublicConfig(connectorId, persistedConfig),
-      now,
-    ),
-  );
-
-  await persistStagedSyncWrite(env.DB, { records, finalizeStatements });
-
-  return {
-    success: true,
-    connectorId,
-    scope,
-    records: result.records.length,
-    detailRecords: invoiceLineItems.length,
-    cursorUpdated: Boolean(
-      result.cursor && result.cursor !== settings.sync_cursor,
-    ),
-  };
-}
-
 export async function syncEsun(
   env: Env,
   trigger: SyncTrigger,
@@ -440,7 +355,7 @@ export async function syncEsun(
     );
   }
 
-  await persistStagedSyncWrite(env.DB, {
+  const newRecords = await persistStagedSyncWrite(env.DB, {
     records,
     afterPromoteStatements:
       bankAccounts.length > 0
@@ -468,6 +383,7 @@ export async function syncEsun(
       bankAccounts.length +
       bankBalanceSnapshots.length +
       bankTransactions.length,
+    newRecords,
     cursorUpdated: Boolean(
       persistedCursor && persistedCursor !== settings.sync_cursor,
     ),
@@ -542,7 +458,7 @@ export async function syncCathaybk(
     );
   }
 
-  await persistStagedSyncWrite(env.DB, {
+  const newRecords = await persistStagedSyncWrite(env.DB, {
     records,
     afterPromoteStatements:
       bankAccounts.length > 0
@@ -563,6 +479,7 @@ export async function syncCathaybk(
       bankAccounts.length +
       bankBalanceSnapshots.length +
       bankTransactions.length,
+    newRecords,
     cursorUpdated: Boolean(
       persistedCursor && persistedCursor !== settings.sync_cursor,
     ),
@@ -646,7 +563,7 @@ export async function syncCtbc(
     );
   }
 
-  await persistStagedSyncWrite(env.DB, {
+  const newRecords = await persistStagedSyncWrite(env.DB, {
     records,
     afterPromoteStatements:
       bankAccounts.length > 0
@@ -668,6 +585,7 @@ export async function syncCtbc(
       bankBalanceSnapshots.length +
       bankTransactions.length +
       creditCardBills.length,
+    newRecords,
     cursorUpdated: Boolean(
       persistedCursor && persistedCursor !== settings.sync_cursor,
     ),
@@ -808,7 +726,7 @@ export async function syncSinopac(
       ),
     );
   }
-  await persistStagedSyncWrite(env.DB, {
+  const newRecords = await persistStagedSyncWrite(env.DB, {
     records,
     afterPromoteStatements: [
       ...reconcileSinopacLegacyTransactionStatements(env.DB),
@@ -829,6 +747,7 @@ export async function syncSinopac(
       bankBalanceSnapshots.length +
       bankTransactions.length +
       creditCardBills.length,
+    newRecords,
     cursorUpdated: Boolean(
       persistedCursor && persistedCursor !== settings.sync_cursor,
     ),
@@ -941,7 +860,7 @@ export async function syncObank(
     );
   }
 
-  await persistStagedSyncWrite(env.DB, {
+  const newRecords = await persistStagedSyncWrite(env.DB, {
     records,
     afterPromoteStatements:
       bankAccounts.length > 0
@@ -960,6 +879,7 @@ export async function syncObank(
       bankAccounts.length +
       bankBalanceSnapshots.length +
       bankTransactions.length,
+    newRecords,
     cursorUpdated: Boolean(
       persistedCursor && persistedCursor !== settings.sync_cursor,
     ),
@@ -1084,7 +1004,7 @@ export async function syncTaishin(
     );
   }
 
-  await persistStagedSyncWrite(env.DB, {
+  const newRecords = await persistStagedSyncWrite(env.DB, {
     records,
     afterPromoteStatements:
       bankAccounts.length > 0
@@ -1104,6 +1024,7 @@ export async function syncTaishin(
       bankBalanceSnapshots.length +
       bankTransactions.length +
       creditCardBills.length,
+    newRecords,
     cursorUpdated: Boolean(
       persistedCursor && persistedCursor !== settings.sync_cursor,
     ),
@@ -1123,6 +1044,7 @@ export async function syncTdcc(
   );
   const scope = tdccOutcomeScope(selected);
   let records = 0;
+  const newRecords = emptySyncNewRecordCounts();
   let cursorUpdated = false;
   let backfillIncomplete: boolean | undefined;
   let tradesQueued: boolean | undefined;
@@ -1136,6 +1058,7 @@ export async function syncTdcc(
       scope,
     });
     records += result.records;
+    mergeSyncNewRecordCounts(newRecords, result.newRecords);
     cursorUpdated = cursorUpdated || result.cursorUpdated;
   }
 
@@ -1148,6 +1071,7 @@ export async function syncTdcc(
     } else {
       const result = await syncTdccTrades(env, trigger, overrides, scope);
       records += result.records;
+      mergeSyncNewRecordCounts(newRecords, result.newRecords);
       cursorUpdated = cursorUpdated || result.cursorUpdated;
       backfillIncomplete = result.backfillIncomplete;
     }
@@ -1158,6 +1082,7 @@ export async function syncTdcc(
     connectorId: "tdcc",
     scope,
     records,
+    newRecords,
     cursorUpdated,
     ...(backfillIncomplete !== undefined && { backfillIncomplete }),
     ...(tradesQueued && { tradesQueued }),
@@ -1173,7 +1098,11 @@ async function syncTdccPositionsAndBank(
     writeBank: boolean;
     scope: SyncScope;
   },
-): Promise<{ records: number; cursorUpdated: boolean }> {
+): Promise<{
+  records: number;
+  newRecords: SyncNewRecordCounts;
+  cursorUpdated: boolean;
+}> {
   const connectorId = "tdcc";
   const settings = await requireConnectorSettings(env.DB, connectorId);
   const config = await decryptJson<unknown>(
@@ -1274,7 +1203,7 @@ async function syncTdccPositionsAndBank(
     );
   }
 
-  await persistStagedSyncWrite(env.DB, {
+  const newRecords = await persistStagedSyncWrite(env.DB, {
     records,
     afterPromoteStatements:
       options.writeBank && bankAccounts.length > 0
@@ -1295,6 +1224,7 @@ async function syncTdccPositionsAndBank(
           bankBalanceSnapshots.length +
           bankTransactions.length
         : 0),
+    newRecords,
     cursorUpdated: Boolean(
       persistedCursor && persistedCursor !== settings.sync_cursor,
     ),
@@ -1308,6 +1238,7 @@ async function syncTdccTrades(
   scope: SyncScope,
 ): Promise<{
   records: number;
+  newRecords: SyncNewRecordCounts;
   cursorUpdated: boolean;
   backfillIncomplete: boolean;
 }> {
@@ -1381,10 +1312,14 @@ async function syncTdccTrades(
     );
   }
 
-  await persistStagedSyncWrite(env.DB, { records, finalizeStatements });
+  const newRecords = await persistStagedSyncWrite(env.DB, {
+    records,
+    finalizeStatements,
+  });
 
   return {
     records: investmentTransactions.length,
+    newRecords,
     cursorUpdated: Boolean(
       persistedCursor && persistedCursor !== settings.sync_cursor,
     ),
@@ -1392,6 +1327,15 @@ async function syncTdccTrades(
       persistedCursor ?? settings.sync_cursor,
     ),
   };
+}
+
+function mergeSyncNewRecordCounts(
+  target: SyncNewRecordCounts,
+  source: SyncNewRecordCounts,
+) {
+  target.invoices += source.invoices;
+  target.bankTransactions += source.bankTransactions;
+  target.investmentTransactions += source.investmentTransactions;
 }
 
 function tdccOutcomeScope(scopes: Set<string>): SyncScope {
@@ -1561,6 +1505,69 @@ export function isUserActionError(error: unknown) {
 }
 
 export function safeErrorMessage(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/\s+/g, " ").slice(0, 300);
+  const message = normalizeErrorText(
+    error instanceof Error
+      ? error.message
+      : error === null || error === undefined
+        ? ""
+        : String(error),
+    300,
+  );
+  return message || "同步失敗，但未取得錯誤原因。";
+}
+
+export function safeErrorLogDetails(error: unknown) {
+  const errorName = normalizeErrorText(
+    error instanceof Error ? error.name : typeof error,
+    80,
+  );
+  const stack =
+    error instanceof Error
+      ? sanitizeErrorDiagnostic(
+          (error.stack ?? "").split("\n").slice(1).join("\n"),
+          1_500,
+        )
+      : "";
+  const cause = error instanceof Error ? error.cause : undefined;
+  const causeName =
+    cause instanceof Error
+      ? normalizeErrorText(cause.name, 80) || "UnknownError"
+      : "";
+  const causeStack =
+    cause instanceof Error
+      ? sanitizeErrorDiagnostic(
+          (cause.stack ?? "").split("\n").slice(1).join("\n"),
+          500,
+        )
+      : "";
+  const stage =
+    error instanceof Error &&
+    "stage" in error &&
+    typeof error.stage === "string"
+      ? normalizeErrorText(error.stage, 80)
+      : "";
+
+  return {
+    errorName: errorName || "UnknownError",
+    ...(stage ? { stage } : {}),
+    ...(stack ? { stack } : {}),
+    ...(causeName ? { causeName } : {}),
+    ...(causeStack ? { causeStack } : {}),
+  };
+}
+
+function normalizeErrorText(value: string, maxLength: number) {
+  return value.replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function sanitizeErrorDiagnostic(value: string, maxLength: number) {
+  return value
+    .replace(/https?:\/\/\S+/gi, "[URL]")
+    .replace(
+      /\b(authorization|cookie|password|passwd|token|secret|session(?:cookies?)?)\s*[:=]\s*([^\s,;]+)/gi,
+      "$1=[redacted]",
+    )
+    .replace(/\b(?:Bearer\s+)?[A-Za-z0-9+/_=-]{24,}\b/g, "[redacted]")
+    .trim()
+    .slice(0, maxLength);
 }

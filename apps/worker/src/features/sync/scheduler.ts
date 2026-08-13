@@ -12,6 +12,7 @@ import type { Env } from "../../platform/env";
 import {
   canonicalSyncLockRowId,
   isUserActionError,
+  safeErrorLogDetails,
   safeErrorMessage,
   startSyncLockHeartbeat,
   SYNC_LOCK_LEASE_MS,
@@ -23,6 +24,10 @@ import {
   safelySendSyncNotification,
 } from "../notifications/service";
 import type { SyncNotificationEvent } from "../notifications/payload";
+import {
+  cancelQueuedEinvoiceSyncRun,
+  startEinvoiceSyncRun,
+} from "./einvoice-sync-service";
 import {
   claimCompletedDefaultScheduleBatch,
   ensureDefaultScheduleBatch,
@@ -79,6 +84,23 @@ async function runCustomScheduleJob(
   controller: ScheduledController,
   job: SyncJobRow<ConnectorId>,
 ) {
+  if (job.connector_id === "einvoice") {
+    const { run, created } = await startEinvoiceSyncRun(env, {
+      trigger: "scheduled",
+    });
+    if (created) {
+      try {
+        await env.SYNC_QUEUE.send({
+          type: "run-einvoice-chunk",
+          runId: run.id,
+        });
+      } catch (error) {
+        await cancelQueuedEinvoiceSyncRun(env, run.id, error);
+        throw error;
+      }
+    }
+    return true;
+  }
   const notification = await runScheduledJob(env, controller, job);
   if (notification) await safelySendSyncNotification(env, notification);
   return notification !== undefined;
@@ -90,6 +112,29 @@ async function runDefaultScheduleBatchJob(
   batchId: string,
   job: SyncJobRow<ConnectorId>,
 ) {
+  if (job.connector_id === "einvoice") {
+    const { run, created } = await startEinvoiceSyncRun(env, {
+      trigger: "scheduled",
+      scheduledBatchId: batchId,
+    });
+    if (created) {
+      try {
+        await env.SYNC_QUEUE.send({
+          type: "run-einvoice-chunk",
+          runId: run.id,
+        });
+      } catch (error) {
+        await cancelQueuedEinvoiceSyncRun(env, run.id, error);
+        throw error;
+      }
+    }
+    return true;
+  }
+  let outcomeNewRecords = {
+    invoices: 0,
+    bankTransactions: 0,
+    investmentTransactions: 0,
+  };
   const notification = await runScheduledJob(
     env,
     controller,
@@ -99,6 +144,7 @@ async function runDefaultScheduleBatchJob(
         batchId,
         jobId: job.id,
         notification: result,
+        newRecords: outcomeNewRecords,
       });
       if (!recorded) {
         throw new Error(
@@ -106,11 +152,16 @@ async function runDefaultScheduleBatchJob(
         );
       }
     },
+    (outcome) => {
+      outcomeNewRecords = outcome.newRecords;
+    },
   );
   if (!notification) return false;
 
   const summary = await claimCompletedDefaultScheduleBatch(env.DB, batchId);
-  if (summary) await safelySendScheduledSyncSummary(env, summary);
+  if (summary) {
+    await safelySendScheduledSyncSummary(env, summary);
+  }
   return true;
 }
 
@@ -119,6 +170,7 @@ async function runScheduledJob(
   controller: ScheduledController,
   due: SyncJobRow<ConnectorId>,
   beforeRelease?: (notification: SyncNotificationEvent) => Promise<void>,
+  onSuccess?: (outcome: Awaited<ReturnType<typeof runDueSyncJob>>) => void,
 ) {
   const runId = crypto.randomUUID();
   const lockRowId = canonicalSyncLockRowId(due.connector_id);
@@ -137,6 +189,7 @@ async function runScheduledJob(
     let notification: SyncNotificationEvent;
     try {
       const outcome = await runDueSyncJob(env, due);
+      onSuccess?.(outcome);
       await completeSyncJob(env.DB, due);
       console.log(
         JSON.stringify({
@@ -159,9 +212,10 @@ async function runScheduledJob(
       const status: SyncStatus = isUserActionError(error)
         ? "needs_user_action"
         : "failed";
+      const message = safeErrorMessage(error);
       await failSyncJob(env.DB, due, {
         status,
-        errorMessage: safeErrorMessage(error),
+        errorMessage: message,
       });
       console.error(
         JSON.stringify({
@@ -172,7 +226,8 @@ async function runScheduledJob(
           scope: due.scope,
           trigger: "scheduled",
           status,
-          message: safeErrorMessage(error),
+          message,
+          ...safeErrorLogDetails(error),
           durationMs: Date.now() - startedAt,
         }),
       );
@@ -196,6 +251,6 @@ async function runDueSyncJob(env: Env, job: SyncJobRow<ConnectorId>) {
     job.connector_id,
     "scheduled",
     job.scope as SyncScope,
-    job.connector_id === "einvoice" ? { fetchDetails: true } : {},
+    {},
   );
 }

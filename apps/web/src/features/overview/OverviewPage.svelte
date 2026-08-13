@@ -19,6 +19,7 @@
   } from "@/data/assets/queries";
   import { bankQuery, bankRangeQuery } from "@/data/bank/queries";
   import { syncJobsQuery } from "@/data/connectors/queries";
+  import { latestSyncReportQuery } from "@/data/sync-reports/queries";
   import {
     getActionableSyncJobs,
     getConfiguredSyncJobs,
@@ -33,9 +34,11 @@
   import {
     formatCompactTwd,
     formatCurrency,
+    missingExchangeRateCurrencies,
     rateMap,
   } from "@/shared/format/financial";
   import NetWorthHistoryChart from "./components/NetWorthHistoryChart.svelte";
+  import LatestSyncReportCard from "./components/LatestSyncReportCard.svelte";
 
   type InsightTone = "coral" | "amber" | "moss" | "steel";
   type InsightIcon = "sync" | "card" | "cashflow";
@@ -66,6 +69,7 @@
   const manualAssets = createQuery(manualAssetsQuery(() => api));
   const rates = createQuery(exchangeRatesQuery(() => api));
   const jobs = createQuery(syncJobsQuery(() => api));
+  const latestSyncReport = createQuery(latestSyncReportQuery(() => api));
   const history = createQuery(netWorthHistoryQuery(() => api));
 
   const bankData = $derived($bank.data ?? { accounts: [], transactions: [] });
@@ -216,15 +220,31 @@
 
     return items.slice(0, 2);
   });
-  const missingRates = $derived([
-    ...new Set(
-      [
-        ...bankData.accounts.map((account) => account.currency),
-        ...($investments.data ?? []).map((item) => item.currency),
-        ...($manualAssets.data ?? []).map((item) => item.currency),
-      ].filter((currency) => currency !== "TWD" && !rateValues[currency]),
-    ),
-  ]);
+  const missingRates = $derived(
+    $rates.isSuccess
+      ? missingExchangeRateCurrencies(
+          [
+            ...deposits.map((account) => ({
+              currency: account.currency,
+              amount: account.balance ?? 0,
+            })),
+            ...cards.map((account) => ({
+              currency: account.currency,
+              amount: Math.abs(account.balance ?? 0),
+            })),
+            ...($investments.data ?? []).map((item) => ({
+              currency: item.currency,
+              amount: (item.marketValue ?? 0) + (item.cashBalance ?? 0),
+            })),
+            ...($manualAssets.data ?? []).map((item) => ({
+              currency: item.currency,
+              amount: item.value ?? 0,
+            })),
+          ],
+          rateValues,
+        )
+      : [],
+  );
   const loading = $derived(
     $bank.isPending ||
       $monthlyBank.isPending ||
@@ -379,6 +399,11 @@
         {/each}
       </CardContent>
     </Card>
+
+    <LatestSyncReportCard
+      report={$latestSyncReport.data}
+      loading={$latestSyncReport.isPending}
+    />
 
     <div class="grid gap-4 xl:grid-cols-[minmax(0,1.8fr)_340px]">
       <div class="min-w-0">

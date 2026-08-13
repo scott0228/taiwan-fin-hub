@@ -8,7 +8,8 @@ export type ScheduledSyncQueueMessage =
       type: "run-tdcc-trades";
       trigger: "manual" | "scheduled";
       attempt: number;
-    };
+    }
+  | { type: "run-einvoice-chunk"; runId: string };
 
 export interface Env {
   DB: D1Database;
