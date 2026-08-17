@@ -8,6 +8,7 @@
   import ManualAssets from "@/features/assets/ManualAssets.svelte";
   import Overview from "@/features/overview/OverviewPage.svelte";
   import SettingsView from "@/features/settings/SettingsPage.svelte";
+  import type { ConnectorId } from "@/data/connectors/types";
   import { createApiClient } from "@/shared/api/client";
   import { swipeBack } from "@/shared/actions/swipe-back";
   import { moneyState } from "@/shared/state/money-visibility.svelte";
@@ -32,6 +33,7 @@
 
   const api = createApiClient();
   let view = $state<View>("overview");
+  let connectorTarget = $state<ConnectorId | null>(null);
   let runtime = $state<RuntimeInfo>({ demoMode: false });
   const isDetail = (v: View): v is DetailView => Object.hasOwn(detailLabels, v);
   const isMobileSetting = (v: View): v is MobileSettingsView =>
@@ -86,8 +88,10 @@
       localStorage.getItem("taiwan-fin-hub-money-hidden") === "true";
     return () => window.removeEventListener("hashchange", handleHashChange);
   });
-  function navigate(next: View) {
+  function navigate(next: View, targetConnector?: ConnectorId) {
     view = next;
+    connectorTarget =
+      next === "data-sources" ? (targetConnector ?? null) : null;
     const nextHash = viewHash(next);
     if (window.location.hash !== nextHash) {
       if (isStandalone()) {
@@ -127,11 +131,11 @@
       class="hidden border-r border-white/10 bg-ink px-6 py-7 text-white xl:sticky xl:top-0 xl:flex xl:h-screen xl:flex-col"
     >
       <div class="px-2">
-        <h1 class="text-xl font-semibold tracking-normal">Taiwan Fin Hub</h1>
+        <h1 class="text-xl font-semibold tracking-normal">不用記帳</h1>
         <p
           class="mt-2 text-xs font-semibold uppercase tracking-[0.16em] text-steel/90"
         >
-          Wealth OS
+          ALL SET
         </p>
       </div>
       <nav class="mt-6 grid gap-1">
@@ -242,6 +246,7 @@
         {:else}<SettingsView
             {api}
             demoMode={runtime.demoMode}
+            {connectorTarget}
             mobileView={view === "more"
               ? "more"
               : isMobileSetting(view)
