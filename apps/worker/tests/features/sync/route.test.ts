@@ -8,6 +8,12 @@ import {
   HncbConnectionError,
 } from "../../../src/connectors/hncb";
 import {
+  CathayOtpChannelRequiredError,
+  CathayOtpInvalidError,
+  CathayOtpRequiredError,
+  CathayOtpSessionExpiredError,
+} from "../../../src/connectors/cathaybk";
+import {
   TaishinBrowserCapacityError,
   TaishinConnectionError,
 } from "../../../src/connectors/taishin";
@@ -15,12 +21,16 @@ import type { Env } from "../../../src/platform/env";
 
 const mocks = vi.hoisted(() => ({
   cancelQueuedEinvoiceSyncRun: vi.fn(),
+  cancelQueuedTdccSyncRun: vi.fn(),
   enqueueEinvoiceSyncChunk: vi.fn(),
+  enqueueTdccSyncChunk: vi.fn(),
   prepareTaishinCaptchaSession: vi.fn(),
   prepareHncbCaptchaSession: vi.fn(),
   prepareObankCaptchaSession: vi.fn(),
   startEinvoiceSyncRun: vi.fn(),
+  startTdccSyncRun: vi.fn(),
   syncCtbc: vi.fn(),
+  syncCathaybk: vi.fn(),
   syncEsun: vi.fn(),
   syncObank: vi.fn(),
   syncHncb: vi.fn(),
@@ -32,8 +42,14 @@ vi.mock("../../../src/features/sync/einvoice-sync-service", () => ({
   startEinvoiceSyncRun: mocks.startEinvoiceSyncRun,
 }));
 
+vi.mock("../../../src/features/sync/tdcc-sync-service", () => ({
+  cancelQueuedTdccSyncRun: mocks.cancelQueuedTdccSyncRun,
+  startTdccSyncRun: mocks.startTdccSyncRun,
+}));
+
 vi.mock("../../../src/features/sync/scheduler-queue", () => ({
   enqueueEinvoiceSyncChunk: mocks.enqueueEinvoiceSyncChunk,
+  enqueueTdccSyncChunk: mocks.enqueueTdccSyncChunk,
 }));
 
 vi.mock("../../../src/features/sync/service", () => ({
@@ -44,7 +60,7 @@ vi.mock("../../../src/features/sync/service", () => ({
   prepareObankCaptchaSession: mocks.prepareObankCaptchaSession,
   safeErrorMessage: (error: unknown) =>
     error instanceof Error ? error.message : String(error),
-  syncCathaybk: vi.fn(),
+  syncCathaybk: mocks.syncCathaybk,
   syncCtbc: mocks.syncCtbc,
   syncEinvoice: vi.fn(),
   syncEsun: mocks.syncEsun,
@@ -78,6 +94,12 @@ beforeEach(() => {
   });
   mocks.enqueueEinvoiceSyncChunk.mockResolvedValue(undefined);
   mocks.cancelQueuedEinvoiceSyncRun.mockResolvedValue(undefined);
+  mocks.startTdccSyncRun.mockResolvedValue({
+    run: { id: "tdcc-run-1" },
+    created: true,
+  });
+  mocks.enqueueTdccSyncChunk.mockResolvedValue(undefined);
+  mocks.cancelQueuedTdccSyncRun.mockResolvedValue(undefined);
   mocks.prepareTaishinCaptchaSession.mockResolvedValue({
     captchaImage: "data:image/jpeg;base64,AQID",
     expiresAt: "2026-07-23T12:02:00.000Z",
@@ -221,6 +243,76 @@ describe("e-invoice sync route", () => {
   });
 });
 
+describe("TDCC sync route", () => {
+  it("queues a newly-created manual durable run", async () => {
+    const response = await syncRoutes.request(
+      "/connectors/tdcc/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
+      env,
+    );
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({
+      connectorId: "tdcc",
+      scope: "all",
+      status: "queued",
+      runId: "tdcc-run-1",
+    });
+    expect(mocks.enqueueTdccSyncChunk).toHaveBeenCalledWith(env, "tdcc-run-1");
+  });
+
+  it("requeues a reused active run so an orphaned Queue chain can resume", async () => {
+    mocks.startTdccSyncRun.mockResolvedValueOnce({
+      run: { id: "tdcc-running" },
+      created: false,
+    });
+
+    const response = await syncRoutes.request(
+      "/connectors/tdcc/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
+      env,
+    );
+
+    expect(response.status).toBe(202);
+    expect(mocks.enqueueTdccSyncChunk).toHaveBeenCalledWith(
+      env,
+      "tdcc-running",
+    );
+    expect(mocks.cancelQueuedTdccSyncRun).not.toHaveBeenCalled();
+  });
+
+  it("does not fail a reused run when its recovery enqueue fails", async () => {
+    mocks.startTdccSyncRun.mockResolvedValueOnce({
+      run: { id: "tdcc-running" },
+      created: false,
+    });
+    mocks.enqueueTdccSyncChunk.mockRejectedValueOnce(
+      new Error("Queue unavailable"),
+    );
+
+    const response = await syncRoutes.request(
+      "/connectors/tdcc/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
+      env,
+    );
+
+    expect(response.status).toBe(500);
+    expect(mocks.cancelQueuedTdccSyncRun).not.toHaveBeenCalled();
+  });
+});
+
 describe("CTBC sync route", () => {
   it("dispatches a manual sync", async () => {
     const response = await syncRoutes.request(
@@ -270,6 +362,88 @@ describe("E.SUN sync route", () => {
         message:
           "E.SUN browser login: duplicate-login dialog kept reappearing.",
       },
+    });
+  });
+});
+
+describe("Cathay sync routes", () => {
+  it("dispatches a manual sync without OTP overrides", async () => {
+    const response = await syncRoutes.request(
+      "/connectors/cathaybk/sync",
+      { method: "POST" },
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.syncCathaybk).toHaveBeenCalledWith(env, "manual", {});
+  });
+
+  it("passes the selected OTP channel and code to the sync service", async () => {
+    const response = await syncRoutes.request(
+      "/connectors/cathaybk/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ otpChannel: "email", otp: "123456" }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.syncCathaybk).toHaveBeenCalledWith(env, "manual", {
+      otpChannel: "email",
+      otp: "123456",
+    });
+  });
+
+  it("rejects a malformed OTP channel before dispatch", async () => {
+    const response = await syncRoutes.request(
+      "/connectors/cathaybk/sync",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ otpChannel: "push" }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+    expect(mocks.syncCathaybk).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      new CathayOtpChannelRequiredError(
+        "請選擇驗證方式。",
+        "pending-session",
+        "2026-08-22T12:00:00.000Z",
+      ),
+      "CATHAY_OTP_CHANNEL_REQUIRED",
+    ],
+    [
+      new CathayOtpRequiredError("Email 驗證碼已寄出。", "email"),
+      "CATHAY_EMAIL_OTP_REQUIRED",
+    ],
+    [
+      new CathayOtpRequiredError("簡訊驗證碼已寄出。", "sms"),
+      "CATHAY_SMS_OTP_REQUIRED",
+    ],
+    [new CathayOtpSessionExpiredError(), "CATHAY_OTP_SESSION_EXPIRED"],
+    [new CathayOtpInvalidError(), "CATHAY_OTP_INVALID"],
+  ])("maps %s to %s", async (error, code) => {
+    mocks.syncCathaybk.mockRejectedValueOnce(error);
+    const response = await syncRoutes.request(
+      "/connectors/cathaybk/sync",
+      { method: "POST" },
+      env,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code },
     });
   });
 });

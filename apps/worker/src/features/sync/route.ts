@@ -14,6 +14,13 @@ import {
   HncbConnectionError,
   HncbVerificationRequiredError,
 } from "../../connectors/hncb";
+import {
+  CathayOtpChannelRequiredError,
+  CathayOtpInvalidError,
+  CathayOtpRequiredError,
+  CathayOtpSessionExpiredError,
+  CathayVerificationRequiredError,
+} from "../../connectors/cathaybk";
 import { SinopacBrowserCapacityError } from "../../connectors/sinopac";
 import {
   TaishinBrowserCapacityError,
@@ -35,6 +42,9 @@ import {
   type SyncOutcome,
 } from "./service";
 import { prepareConnectorChallenge, runConnectorSync } from "./registry";
+import { cancelQueuedTdccSyncRun, startTdccSyncRun } from "./tdcc-sync-service";
+import { enqueueTdccSyncChunk } from "./scheduler-queue";
+import type { TdccRunScope } from "./tdcc-run-repository";
 
 const tdccSyncBodySchema = z.object({
   otp: z.string().min(1).optional(),
@@ -67,6 +77,11 @@ const obankSyncBodySchema = z.object({
     .string()
     .regex(/^[A-Za-z0-9]{4}$/)
     .optional(),
+});
+
+const cathaySyncBodySchema = z.object({
+  otp: z.string().min(1).optional(),
+  otpChannel: z.enum(["email", "sms"]).optional(),
 });
 
 export const syncRoutes = honoFactory.createApp();
@@ -119,12 +134,7 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
     ),
     async (c) => {
       const overrides = c.req.valid("json");
-      return syncRouteResponse(
-        c,
-        withManualSyncLock(c.env, "tdcc", SYNC_SCOPE_ALL, () =>
-          runConnectorSync(c.env, "tdcc", "manual", SYNC_SCOPE_ALL, overrides),
-        ),
-      );
+      return queuedTdccSyncResponse(c, "all", overrides);
     },
   );
 
@@ -137,18 +147,7 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
     ),
     async (c) => {
       const overrides = c.req.valid("json");
-      return syncRouteResponse(
-        c,
-        withManualSyncLock(c.env, "tdcc", TDCC_SCOPE_INVESTMENTS, () =>
-          runConnectorSync(
-            c.env,
-            "tdcc",
-            "manual",
-            TDCC_SCOPE_INVESTMENTS,
-            overrides,
-          ),
-        ),
-      );
+      return queuedTdccSyncResponse(c, "investments", overrides);
     },
   );
 
@@ -161,12 +160,7 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
     ),
     async (c) => {
       const overrides = c.req.valid("json");
-      return syncRouteResponse(
-        c,
-        withManualSyncLock(c.env, "tdcc", TDCC_SCOPE_BANK, () =>
-          runConnectorSync(c.env, "tdcc", "manual", TDCC_SCOPE_BANK, overrides),
-        ),
-      );
+      return queuedTdccSyncResponse(c, "bank", overrides);
     },
   );
 
@@ -179,18 +173,7 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
     ),
     async (c) => {
       const overrides = c.req.valid("json");
-      return syncRouteResponse(
-        c,
-        withManualSyncLock(c.env, "tdcc", TDCC_SCOPE_TRADES, () =>
-          runConnectorSync(
-            c.env,
-            "tdcc",
-            "manual",
-            TDCC_SCOPE_TRADES,
-            overrides,
-          ),
-        ),
-      );
+      return queuedTdccSyncResponse(c, "trades", overrides);
     },
   );
 
@@ -203,14 +186,29 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
     );
   });
 
-  api.post("/connectors/cathaybk/sync", async (c) => {
-    return syncRouteResponse(
-      c,
-      withManualSyncLock(c.env, "cathaybk", SYNC_SCOPE_ALL, () =>
-        runConnectorSync(c.env, "cathaybk", "manual"),
-      ),
-    );
-  });
+  api.post(
+    "/connectors/cathaybk/sync",
+    zValidator(
+      "json",
+      cathaySyncBodySchema,
+      validationHook("INVALID_REQUEST", "Cathay sync options are invalid."),
+    ),
+    async (c) => {
+      const overrides = c.req.valid("json");
+      return syncRouteResponse(
+        c,
+        withManualSyncLock(c.env, "cathaybk", SYNC_SCOPE_ALL, () =>
+          runConnectorSync(
+            c.env,
+            "cathaybk",
+            "manual",
+            SYNC_SCOPE_ALL,
+            overrides,
+          ),
+        ),
+      );
+    },
+  );
 
   api.post("/connectors/ctbc/sync", async (c) => {
     return syncRouteResponse(
@@ -409,6 +407,40 @@ function registerSyncRoutes(api: Hono<AppBindings>) {
   );
 }
 
+async function queuedTdccSyncResponse(
+  c: Context<AppBindings>,
+  scope: TdccRunScope,
+  overrides: Record<string, unknown>,
+) {
+  try {
+    const { run, created } = await startTdccSyncRun(c.env, {
+      trigger: "manual",
+      scope,
+      overrides,
+    });
+    try {
+      await enqueueTdccSyncChunk(c.env, run.id);
+    } catch (error) {
+      if (created) {
+        await cancelQueuedTdccSyncRun(c.env, run.id, error);
+      }
+      throw error;
+    }
+    return c.json(
+      {
+        success: true as const,
+        connectorId: "tdcc" as const,
+        scope,
+        status: "queued" as const,
+        runId: run.id,
+      },
+      202,
+    );
+  } catch (error) {
+    return syncRouteResponse(c, Promise.reject(error) as Promise<SyncOutcome>);
+  }
+}
+
 async function syncRouteResponse(
   c: Context<AppBindings>,
   result: Promise<SyncOutcome>,
@@ -418,6 +450,35 @@ async function syncRouteResponse(
   } catch (error) {
     if (error instanceof SyncAlreadyRunningError) {
       return jsonError("SYNC_ALREADY_RUNNING", safeErrorMessage(error), 409);
+    }
+    if (error instanceof CathayOtpChannelRequiredError) {
+      return jsonError(
+        "CATHAY_OTP_CHANNEL_REQUIRED",
+        safeErrorMessage(error),
+        400,
+      );
+    }
+    if (error instanceof CathayOtpRequiredError) {
+      return jsonError(
+        error.channel === "sms"
+          ? "CATHAY_SMS_OTP_REQUIRED"
+          : "CATHAY_EMAIL_OTP_REQUIRED",
+        safeErrorMessage(error),
+        400,
+      );
+    }
+    if (error instanceof CathayOtpSessionExpiredError) {
+      return jsonError(
+        "CATHAY_OTP_SESSION_EXPIRED",
+        safeErrorMessage(error),
+        400,
+      );
+    }
+    if (error instanceof CathayOtpInvalidError) {
+      return jsonError("CATHAY_OTP_INVALID", safeErrorMessage(error), 400);
+    }
+    if (error instanceof CathayVerificationRequiredError) {
+      return jsonError("USER_ACTION_REQUIRED", safeErrorMessage(error), 400);
     }
     if (error instanceof TdccVerificationRequiredError) {
       return jsonError(

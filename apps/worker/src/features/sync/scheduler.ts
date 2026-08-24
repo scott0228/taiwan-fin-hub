@@ -28,6 +28,7 @@ import {
   cancelQueuedEinvoiceSyncRun,
   startEinvoiceSyncRun,
 } from "./einvoice-sync-service";
+import { cancelQueuedTdccSyncRun, startTdccSyncRun } from "./tdcc-sync-service";
 import {
   claimCompletedDefaultScheduleBatch,
   ensureDefaultScheduleBatch,
@@ -101,6 +102,24 @@ async function runCustomScheduleJob(
     }
     return true;
   }
+  if (job.connector_id === "tdcc") {
+    const { run, created } = await startTdccSyncRun(env, {
+      trigger: "scheduled",
+      scope: "all",
+    });
+    try {
+      await env.SYNC_QUEUE.send({
+        type: "run-tdcc-chunk",
+        runId: run.id,
+      });
+    } catch (error) {
+      if (created) {
+        await cancelQueuedTdccSyncRun(env, run.id, error);
+      }
+      throw error;
+    }
+    return true;
+  }
   const notification = await runScheduledJob(env, controller, job);
   if (notification) await safelySendSyncNotification(env, notification);
   return notification !== undefined;
@@ -127,6 +146,25 @@ async function runDefaultScheduleBatchJob(
         await cancelQueuedEinvoiceSyncRun(env, run.id, error);
         throw error;
       }
+    }
+    return true;
+  }
+  if (job.connector_id === "tdcc") {
+    const { run, created } = await startTdccSyncRun(env, {
+      trigger: "scheduled",
+      scope: "all",
+      scheduledBatchId: batchId,
+    });
+    try {
+      await env.SYNC_QUEUE.send({
+        type: "run-tdcc-chunk",
+        runId: run.id,
+      });
+    } catch (error) {
+      if (created) {
+        await cancelQueuedTdccSyncRun(env, run.id, error);
+      }
+      throw error;
     }
     return true;
   }

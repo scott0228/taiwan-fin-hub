@@ -1,15 +1,9 @@
 import type { ConnectorId } from "@taiwan-fin-hub/core";
 
 export type ScheduledSyncQueueMessage =
-  | {
-      type: "run-next-scheduled-sync";
-    }
-  | {
-      type: "run-tdcc-trades";
-      trigger: "manual" | "scheduled";
-      attempt: number;
-    }
-  | { type: "run-einvoice-chunk"; runId: string };
+  | { type: "run-next-scheduled-sync" }
+  | { type: "run-einvoice-chunk"; runId: string }
+  | { type: "run-tdcc-chunk"; runId: string };
 
 export interface Env {
   DB: D1Database;

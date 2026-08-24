@@ -1,0 +1,110 @@
+{
+  "version": "2.0.0",
+  "date": "2026-08-18",
+  "mode": "comprehensive",
+  "scope": "full",
+  "diff_mode": false,
+  "phases_run": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14],
+  "attack_surface": {
+    "code": { "public_endpoints": 0, "authenticated": 32, "admin": 0, "api": 32, "uploads": 1, "integrations": 9, "background_jobs": 3, "websockets": 0 },
+    "infrastructure": { "ci_workflows": 2, "webhook_receivers": 0, "container_configs": 0, "iac_configs": 0, "deploy_targets": 1, "secret_management": "cloudflare-secrets + D1 AES-GCM encrypted config" }
+  },
+  "findings": [
+    {
+      "id": 1, "severity": "HIGH", "confidence": 8, "status": "VERIFIED", "phase": 4,
+      "phase_name": "CI/CD Pipeline Security", "category": "Software and Data Integrity Failures (A08)",
+      "fingerprint": "sync-upstream-autoupdate-rce",
+      "title": "Auto-update chain executes upstream-controlled code on every fork",
+      "file": ".github/workflows/sync-upstream.yml", "line": 46,
+      "description": "Daily workflow runs repo copy of scripts/sync-upstream.mjs, which is itself replaced by upstream on each sync (only .github/workflows/ is protected). Compromised upstream main gets code execution in every fork runner (contents:write GITHUB_TOKEN) within 24h, and its git push triggers Cloudflare Workers Build running npm ci + prebuild with the deployer's Cloudflare API token and remote D1 write.",
+      "exploit_scenario": "Attacker compromises upstream TedLin1993/all-set-tw main -> injects payload into scripts/sync-upstream.mjs or package.json/postinstall -> every deployed fork syncs within 24h -> fork runner executes payload with contents:write token; pushed merge triggers Cloudflare build executing arbitrary code with deployer Cloudflare credentials + D1 access to their financial data.",
+      "impact": "Supply-chain RCE across all deployed forks; access to each deployer's Cloudflare account token and encrypted financial DB.",
+      "recommendation": "This is a deliberate auto-update tradeoff; accept with mitigations. SHA-pin actions/checkout and setup-node; add persist-credentials:false to the sync checkout; pin the bootstrap curl download to a commit SHA + checksum; consider signing releases or requiring a tag rather than tracking mutable main.",
+      "verification": "independently verified"
+    },
+    {
+      "id": 2, "severity": "MEDIUM", "confidence": 9, "status": "VERIFIED", "phase": 9,
+      "phase_name": "OWASP A03 Injection", "category": "Injection (A03) / ReDoS",
+      "fingerprint": "classification-user-regex-redos",
+      "title": "User-supplied regex run per-transaction with no timeout (ReDoS self-DoS)",
+      "file": "apps/worker/src/features/classification/service.ts", "line": 44,
+      "description": "new RegExp(rule.pattern, 'i').test(text) compiles a user-stored classification rule pattern (max 300 chars) and runs it against every transaction on every /api/bank-transactions and /api/activity read. try/catch only swallows syntax errors, not catastrophic backtracking.",
+      "exploit_scenario": "Authenticated user saves a regex rule like (a+)+$ -> every subsequent transaction listing re-evaluates it per row -> Worker hits CPU limit and requests fail persistently until the rule is deleted.",
+      "impact": "Persistent self-inflicted DoS of the read path. Not reachable in demo mode (write blocked by demoReadOnlyMiddleware). Single-tenant per deployment, so blast radius is the owner only.",
+      "recommendation": "Add a length+complexity guard, run the regex with a RE2-style linear engine, or cap total match time. Cheapest: reject patterns with nested quantifiers, keep the 300-char cap low.",
+      "verification": "independently verified"
+    },
+    {
+      "id": 3, "severity": "MEDIUM", "confidence": 7, "status": "VERIFIED", "phase": 3,
+      "phase_name": "Dependency Supply Chain", "category": "Vulnerable Components (A06)",
+      "fingerprint": "npm-audit-hono-ip-address",
+      "title": "7 npm advisories (hono x2, ip-address x3 high) — none reachable in runtime path",
+      "file": "package-lock.json", "line": 0,
+      "description": "npm audit: 2 moderate (hono Proxy Helper header leak, Language middleware ReDoS), 5 high (ip-address SSRF misclassification x3, others). hono Proxy Helper and languageDetector are NOT imported anywhere. ip-address is transitive via @puppeteer/browsers > proxy-agent > socks-proxy-agent, used only for local browser download/launch, not the Workers BROWSER binding runtime path.",
+      "exploit_scenario": "No reachable path found. Advisories apply to code the app never executes at runtime.",
+      "impact": "Low practical risk today; hygiene debt. npm audit fix resolves both without breaking changes.",
+      "recommendation": "Run npm audit fix to update hono (4.12.26 -> patched) and bump the puppeteer chain. Re-run audit in CI as a gate.",
+      "verification": "independently verified"
+    },
+    {
+      "id": 4, "severity": "LOW", "confidence": 8, "status": "VERIFIED", "phase": 9,
+      "phase_name": "OWASP A09 Logging/Disclosure", "category": "Information Disclosure",
+      "fingerprint": "demo-mode-lasterror-leak",
+      "title": "Connector error strings persisted unredacted, served on GET /api/sync-jobs (readable in demo mode)",
+      "file": "apps/worker/src/features/sync/service.ts", "line": 1530,
+      "description": "safeErrorMessage only truncates to 300 chars; it does NOT redact URLs/tokens/cookies (unlike sanitizeErrorDiagnostic used for logs). Its output is stored as last_error and returned by GET /api/sync-jobs, which is readable by unauthenticated visitors in demo mode. Upstream bank error text (e.g. obank statusDesc interpolated verbatim) can land there.",
+      "exploit_scenario": "Bank returns an error containing a URL/token in statusDesc -> stored verbatim in last_error -> anyone hitting the demo deployment's GET /api/sync-jobs reads it.",
+      "impact": "Potential low-volume disclosure of upstream-embedded values in demo deployments. No app secret confirmed leaked.",
+      "recommendation": "Apply sanitizeErrorDiagnostic's redaction inside safeErrorMessage so stored/served messages are scrubbed.",
+      "verification": "independently verified"
+    },
+    {
+      "id": 5, "severity": "LOW", "confidence": 7, "status": "VERIFIED", "phase": 2,
+      "phase_name": "Secrets Handling", "category": "Cryptographic Failures (A02)",
+      "fingerprint": "vapid-key-temp-plaintext",
+      "title": "VAPID private key written to shared temp dir in plaintext during deploy",
+      "file": "scripts/deploy-with-vapid.mjs", "line": 369,
+      "description": "Private key written to a mkdtemp (0700) file with mode 0o600, removed in finally{}. finally does not run on SIGINT/SIGKILL/crash (no signal handler, unlike dev-worker.mjs), leaving the key in os.tmpdir(). When source secrets file is dotenv, its entire contents are copied into the temp file.",
+      "exploit_scenario": "Deploy interrupted with SIGKILL -> plaintext VAPID private key (and any other dotenv secrets) remain in os.tmpdir() until manually cleared; another local user reads them.",
+      "impact": "Local-only, requires deploy interruption + shared host. Push notifications can be spoofed if key leaks.",
+      "recommendation": "Add SIGINT/SIGTERM cleanup handler; pass secrets to wrangler via stdin instead of a temp file.",
+      "verification": "independently verified"
+    },
+    {
+      "id": 6, "severity": "LOW", "confidence": 8, "status": "VERIFIED", "phase": 4,
+      "phase_name": "CI/CD Pipeline Security", "category": "CI/CD Hardening",
+      "fingerprint": "unpinned-actions-no-permissions",
+      "title": "Actions tag-pinned not SHA-pinned; ci.yml has no permissions block",
+      "file": ".github/workflows/ci.yml", "line": 13,
+      "description": "actions/checkout@v4 and setup-node@v4 use mutable tags in both workflows. ci.yml declares no permissions:, inheriting default GITHUB_TOKEN scope while running npm ci (executes dependency lifecycle scripts).",
+      "exploit_scenario": "Tag re-point or default-write token abused if a dependency postinstall is malicious during npm ci.",
+      "impact": "Standard CI hardening gap. Elevated for the contents:write sync job.",
+      "recommendation": "SHA-pin all actions; add permissions: contents: read to ci.yml.",
+      "verification": "independently verified"
+    },
+    {
+      "id": 7, "severity": "LOW", "confidence": 6, "status": "TENTATIVE", "phase": 6,
+      "phase_name": "Integration Audit", "category": "SSRF (A10) defense-in-depth",
+      "fingerprint": "esun-cookie-jar-redirect",
+      "title": "E.SUN session cookie jar replayed to manual-redirect targets without origin check",
+      "file": "apps/worker/src/connectors/esun.ts", "line": 1347",
+      "description": "Manual redirect following (up to 5 hops) sets the full E.SUN cookie jar on each hop with no same-origin guard, unlike Taishin's domain allowlist. Attacker must control the bank's Location response, so this is defense-in-depth only.",
+      "exploit_scenario": "If E.SUN infra returned an off-origin Location, session cookies would be sent to that host.",
+      "impact": "Very low; requires bank-side compromise.",
+      "recommendation": "Add a same-origin check before replaying cookies on redirect, matching the Taishin allowlist pattern.",
+      "verification": "self-verified"
+    }
+  ],
+  "supply_chain_summary": {
+    "direct_deps": 8, "transitive_deps": 0,
+    "critical_cves": 0, "high_cves": 5, "moderate_cves": 2,
+    "install_scripts": 0, "lockfile_present": true, "lockfile_tracked": true,
+    "tools_skipped": []
+  },
+  "filter_stats": {
+    "candidates_scanned": 30, "hard_exclusion_filtered": 10,
+    "confidence_gate_filtered": 6, "verification_filtered": 7, "reported": 7
+  },
+  "totals": { "critical": 0, "high": 1, "medium": 2, "low": 3, "tentative": 1 },
+  "trend": { "prior_report_date": null, "resolved": 0, "persistent": 0, "new": 7, "direction": "first_run" }
+}
