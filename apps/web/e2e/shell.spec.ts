@@ -1,5 +1,18 @@
 import { expect, test, type Page } from "@playwright/test";
 
+function taipeiMonth() {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en", {
+      timeZone: "Asia/Taipei",
+      year: "numeric",
+      month: "2-digit",
+    })
+      .formatToParts(new Date())
+      .map(({ type, value }) => [type, value]),
+  );
+  return `${parts.year}-${parts.month}`;
+}
+
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -50,7 +63,15 @@ test.beforeEach(async ({ page }) => {
         { id: "fee", label: "手續費", sortOrder: 11, isSystem: true },
         { id: "insurance", label: "保險", sortOrder: 12, isSystem: true },
         { id: "tax", label: "稅務", sortOrder: 13, isSystem: true },
-        { id: "other", label: "未分類", sortOrder: 14, isSystem: true },
+        { id: "software", label: "軟體服務", sortOrder: 14, isSystem: true },
+        { id: "utilities", label: "生活繳費", sortOrder: 15, isSystem: true },
+        {
+          id: "other-income",
+          label: "其他收入",
+          sortOrder: 16,
+          isSystem: true,
+        },
+        { id: "other", label: "未分類", sortOrder: 17, isSystem: true },
       ];
     else if (path === "/api/classification/rules") body = [];
     else if (path.includes("/connectors/") && path.endsWith("/settings"))
@@ -118,6 +139,41 @@ async function expectSelectedConnectorInView(
   }));
   expect(pageWidth.scroll).toBe(pageWidth.client);
 }
+
+test("overview uses one monthly bank request for balances and cash flow", async ({
+  page,
+}) => {
+  const bankRequests: URL[] = [];
+  await page.route("**/api/bank**", async (route) => {
+    bankRequests.push(new URL(route.request().url()));
+    await route.fulfill({
+      json: {
+        accounts: [
+          {
+            id: "overview-account",
+            connectorId: "esun",
+            sourceId: "overview-account",
+            accountType: "savings",
+            balance: 12345,
+            currency: "TWD",
+          },
+        ],
+        transactions: [],
+      },
+    });
+  });
+
+  await page.goto("/#/overview");
+  await expect(
+    page.getByText("NT$12,345", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(page.getByText("載入總覽中")).toHaveCount(0);
+  expect(bankRequests).toHaveLength(1);
+  expect(bankRequests[0].searchParams.get("from")).toMatch(/^\d{4}-\d{2}$/);
+  expect(bankRequests[0].searchParams.get("to")).toBe(
+    bankRequests[0].searchParams.get("from"),
+  );
+});
 
 test("loads the responsive shell and changes primary views", async ({
   page,
@@ -656,7 +712,7 @@ test("shows this month's cash flow on the overview and opens activity", async ({
 test("filters activity by cash flow and keeps source filters composable", async ({
   page,
 }) => {
-  const month = new Date().toISOString().slice(0, 7);
+  const month = taipeiMonth();
   await page.route("**/api/bank**", async (route) => {
     await route.fulfill({
       status: 200,
@@ -753,6 +809,155 @@ test("filters activity by cash flow and keeps source filters composable", async 
   await sourceFilters.getByRole("tab", { name: "信用卡" }).click();
   await expect(activityRows).toHaveCount(1);
   await expect(activityRows).toContainText("信用卡消費");
+});
+
+test("shows reliable activity times and sorts them on desktop and mobile", async ({
+  page,
+}) => {
+  const month = taipeiMonth();
+  const activityDate = `${month}-10`;
+  const invoice = {
+    id: "invoice-time-only",
+    connectorId: "einvoice",
+    sourceId: "invoice-time-only-source",
+    invoiceDate: `${activityDate}T23:45:00+08:00`,
+    invoiceNumber: "TIME-0001",
+    sellerName: "發票時間不應套用",
+    amount: 860,
+  };
+
+  await page.route("**/api/bank**", async (route) => {
+    await route.fulfill({
+      json: {
+        accounts: [
+          {
+            id: "time-card",
+            connectorId: "sinopac",
+            sourceId: "time-card-source",
+            institutionName: "測試銀行",
+            accountName: "時間測試卡",
+            accountType: "credit",
+            currency: "TWD",
+          },
+        ],
+        transactions: [
+          {
+            id: "legacy-date-only",
+            connectorId: "sinopac",
+            accountId: "time-card",
+            sourceId: "legacy-date-only-source",
+            postedDate: `${month}-11T00:00:00.000Z`,
+            amount: -50,
+            currency: "TWD",
+            description: "舊資料活動",
+            status: "posted",
+            excludedFromCalculation: false,
+          },
+          {
+            id: "timed-activity",
+            connectorId: "sinopac",
+            accountId: "time-card",
+            sourceId: "timed-activity-source",
+            postedDate: activityDate,
+            authorizedAt: `${activityDate}T14:30:00+08:00`,
+            amount: -120,
+            currency: "TWD",
+            description: "有時間活動",
+            status: "posted",
+            excludedFromCalculation: false,
+          },
+          {
+            id: "midnight-activity",
+            connectorId: "sinopac",
+            accountId: "time-card",
+            sourceId: "midnight-activity-source",
+            postedDate: activityDate,
+            authorizedAt: `${activityDate}T00:00:00+08:00`,
+            amount: -100,
+            currency: "TWD",
+            description: "真午夜活動",
+            status: "posted",
+            excludedFromCalculation: false,
+          },
+          {
+            id: "matched-date-only",
+            connectorId: "sinopac",
+            accountId: "time-card",
+            sourceId: "matched-date-only-source",
+            postedDate: activityDate,
+            amount: -860,
+            currency: "TWD",
+            description: "無授權時間配對",
+            status: "posted",
+            excludedFromCalculation: false,
+          },
+        ],
+      },
+    });
+  });
+  await page.route("**/api/invoices**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    await route.fulfill({
+      json: path === "/api/invoices" ? [invoice] : { ...invoice, items: [] },
+    });
+  });
+
+  await page.goto("/#/activity");
+
+  const desktopRows = page.locator("tbody tr");
+  await expect(desktopRows).toHaveCount(4);
+  await expect(desktopRows.filter({ hasText: "有時間活動" })).toContainText(
+    "14:30",
+  );
+  await expect(desktopRows.filter({ hasText: "真午夜活動" })).toContainText(
+    "00:00",
+  );
+  await expect(desktopRows.filter({ hasText: "舊資料活動" })).not.toContainText(
+    "00:00",
+  );
+  await expect(
+    desktopRows.filter({ hasText: "無授權時間配對" }),
+  ).not.toContainText("23:45");
+
+  const desktopRowTexts = await desktopRows.allTextContents();
+  expect(desktopRowTexts.findIndex((text) => text.includes("舊資料活動"))).toBe(
+    0,
+  );
+  expect(
+    desktopRowTexts.findIndex((text) => text.includes("有時間活動")),
+  ).toBeLessThan(
+    desktopRowTexts.findIndex((text) => text.includes("真午夜活動")),
+  );
+  expect(
+    desktopRowTexts.findIndex((text) => text.includes("真午夜活動")),
+  ).toBeLessThan(
+    desktopRowTexts.findIndex((text) => text.includes("無授權時間配對")),
+  );
+
+  await desktopRows.filter({ hasText: "無授權時間配對" }).click();
+  const desktopDetail = page.getByRole("dialog", { name: "活動明細" });
+  await expect(desktopDetail).toBeVisible();
+  await expect(desktopDetail).not.toContainText("23:45");
+  await page.getByRole("button", { name: "關閉活動明細" }).click();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  const mobileTimed = page.getByRole("button", {
+    name: "查看 有時間活動 活動詳情",
+  });
+  const mobileMidnight = page.getByRole("button", {
+    name: "查看 真午夜活動 活動詳情",
+  });
+  const mobileLegacy = page.getByRole("button", {
+    name: "查看 舊資料活動 活動詳情",
+  });
+  const mobileMatched = page.getByRole("button", {
+    name: "查看 無授權時間配對 活動詳情",
+  });
+  await expect(mobileTimed).toContainText("14:30");
+  await expect(mobileMidnight).toContainText("00:00");
+  await expect(mobileLegacy).not.toContainText("00:00");
+  await expect(mobileMatched).not.toContainText("23:45");
 });
 
 test("uses app-like scrolling and history only in standalone display mode", async ({

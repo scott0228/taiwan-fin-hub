@@ -4,11 +4,14 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   listBankTransactionsForTransferMatching,
+  listBankTransactionsInRange,
   type BankTransactionPageRow,
 } from "../../../src/features/bank/repository";
+import { listInvoicesInRange } from "../../../src/features/invoices/repository";
 
 class SqliteD1 {
   readonly database = new DatabaseSync(":memory:");
+  lastQuery?: { sql: string; values: unknown[] };
 
   constructor() {
     const migrationsDirectory = fileURLToPath(
@@ -25,9 +28,11 @@ class SqliteD1 {
 
   prepare(sql: string) {
     let values: unknown[] = [];
+    this.lastQuery = { sql, values };
     const statement = {
-      bind(...nextValues: unknown[]) {
+      bind: (...nextValues: unknown[]) => {
         values = nextValues;
+        this.lastQuery = { sql, values };
         return statement;
       },
       async all<T>() {
@@ -78,6 +83,63 @@ function createDb() {
 }
 
 describe("bank transaction transfer candidates", () => {
+  it("uses the transaction day index for the range query", async () => {
+    const db = createDb();
+    await listBankTransactionsInRange(db as unknown as D1Database, {
+      from: "2026-09-01",
+      to: "2026-10-01",
+    });
+    const query = db.lastQuery;
+    expect(query).toBeDefined();
+    const plan = db.database
+      .prepare(`EXPLAIN QUERY PLAN ${query?.sql ?? ""}`)
+      .all(...((query?.values ?? []) as never[])) as Array<{
+      detail: string;
+    }>;
+    expect(plan.map(({ detail }) => detail).join("\n")).toMatch(
+      /SEARCH txn USING INDEX idx_bank_transactions_transaction_day/,
+    );
+  });
+
+  it("uses Taipei dates for precise bank and invoice timestamps at month boundaries", async () => {
+    const db = createDb();
+    db.database.exec(`
+      UPDATE bank_transactions SET authorized_at = '2026-08-31T16:30:00.000Z'
+        WHERE id = 'out';
+      UPDATE bank_transactions SET authorized_at = '2026-08-31T15:59:00.000Z'
+        WHERE id = 'in';
+      UPDATE bank_transactions
+      SET authorized_at = NULL, posted_date = '2026-09-01T12:00:00.000Z', amount = 12345
+      WHERE id = 'late';
+      INSERT INTO invoices
+        (id, connector_id, source_id, invoice_date, amount, created_at, updated_at)
+      VALUES
+        ('sep', 'einvoice', 'sep', '2026-08-31T16:30:00.000Z', 100, '2026-09-01', '2026-09-01'),
+        ('aug', 'einvoice', 'aug', '2026-08-31T15:59:00.000Z', 100, '2026-09-01', '2026-09-01'),
+        ('date', 'einvoice', 'date', '2026-09-01', 100, '2026-09-01', '2026-09-01');
+    `);
+    const range = { from: "2026-09-01", to: "2026-10-01" };
+    expect(
+      (
+        await listBankTransactionsInRange(db as unknown as D1Database, range)
+      ).map((row) => row.id),
+    ).toEqual(["late", "out"]);
+    expect(
+      (await listInvoicesInRange(db as unknown as D1Database, range))
+        .map((row) => row.id)
+        .sort(),
+    ).toEqual(["date", "sep"]);
+    expect(
+      (
+        await listBankTransactionsForTransferMatching(
+          db as unknown as D1Database,
+          [{ amount: -10_000, currency: "TWD" }],
+          ["2026-09-01"],
+        )
+      ).map((row) => row.id),
+    ).toEqual(["out"]);
+  });
+
   it("loads posted rows sharing a visible amount and currency", async () => {
     const db = createDb();
     const rows = await listBankTransactionsForTransferMatching(
