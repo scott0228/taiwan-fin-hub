@@ -20,14 +20,14 @@ Connector 採三層 registry：
 
 新增 connector 前先選擇最接近的連接模式：
 
-| Mode                      | 適用情境                                                 | 現有範例             |
-| ------------------------- | -------------------------------------------------------- | -------------------- |
-| `api_credentials`         | 帳密登入外部 API，可自行更新 token                       | 電子發票、中信、新光 |
-| `api_captcha_session`     | App API 登入含 CAPTCHA，challenge 僅短暫加密保存         | 王道銀行             |
-| `api_device_otp`          | API 登入，首次裝置需要 OTP                               | 集保 e 存摺          |
-| `browser_per_sync`        | 每次同步都必須以 Browser 登入與擷取                      | 國泰世華             |
-| `browser_session`         | Browser 只負責登入，後續使用可復用的 HTTP session        | 玉山                 |
-| `browser_captcha_session` | Browser 登入含 CAPTCHA，可由 AI 或人工完成並復用 session | 永豐、台新           |
+| Mode                      | 適用情境                                                 | 現有範例                   |
+| ------------------------- | -------------------------------------------------------- | -------------------------- |
+| `api_credentials`         | 帳密登入外部 API，可自行更新 token                       | 電子發票、中信、新光       |
+| `api_captcha_session`     | App API 登入含 CAPTCHA，challenge 僅短暫加密保存         | 王道銀行                   |
+| `api_device_otp`          | API 登入，首次裝置需要 OTP                               | 集保 e 存摺                |
+| `browser_per_sync`        | 每次同步都必須以 Browser 登入與擷取                      | 國泰世華                   |
+| `browser_session`         | Browser 只負責登入，後續使用可復用的 HTTP session        | 玉山                       |
+| `browser_captcha_session` | Browser 登入含 CAPTCHA，可由 AI 或人工完成並復用 session | 永豐、台新、華南、第一銀行 |
 
 不要為單一銀行建立新的通用框架。只有登入生命週期真的不同時才新增 mode，並同時補上 catalog 說明及共同測試。
 
@@ -82,6 +82,15 @@ Schema 需要涵蓋同步期間會持久化的 secret state，否則 Zod parse �
 
 Connector 不得依賴 Hono、D1、Worker `Env`，也不得直接寫入資料庫。
 
+所有 Browser adapter 建立新瀏覽器時，統一呼叫
+`apps/worker/src/connectors/browser.ts` 的 `launchBrowserWithRetry`，不得直接呼叫
+`puppeteer.launch`。共用 adapter 在 binding `fetch` 層僅針對建立瀏覽器的
+`POST /v1/devtools/browser` 請求依 HTTP status `503` 判斷重試，不比對錯誤文案。
+預設等待 2 秒、5 秒後重試，
+最多嘗試 3 次；耗盡後保留原始錯誤，交由既有同步失敗流程處理。結構化 log
+只記錄狀態碼、嘗試次數與重試延遲。`429` 額度／限流錯誤維持既有處理，
+session 重連、瀏覽器建立後的操作與銀行登入不在此重試範圍內。
+
 ## 正規化資料契約
 
 - Connector 回傳 `SyncResult`，資料必須符合 `@taiwan-fin-hub/core`。
@@ -96,15 +105,47 @@ Connector 不得依賴 Hono、D1、Worker `Env`，也不得直接寫入資料庫
   connector 可直接以其 run item table 作為 staging source。資料 promotion 與 cursor
   必須放在同一 guarded D1 batch，secret state 需以設定版本 CAS 保護。
 
+永豐信用卡取得 `LatestTx.Items` 與 `OutstandingDetail.Detail` 後，在 `bank_transactions`
+原表保存授權，以 `matched_transaction_id` 記錄已入帳關係，不另設授權表或停用欄位。
+配對僅限同卡、同消費日，不跨日；排除手續費、服務費、不同金額方向與卡片識別不足的資料。
+既有相同 sourceId 優先，其次同幣別同金額，再以正規化店名相似度及目前匯率金額接近度
+計分；同組採最大總分的一對一分配，無合理候選則不配對。跨幣別不要求人工確認。
+已配對關係不重新分配；已入帳保留正式金額、幣別與入帳日，只繼承授權時刻。
+在同一 D1 batch upsert 交易、保存配對、補入時刻，並於首次配對移轉原授權的個別分類、
+計算偏好（已入帳既有設定優先）及發票關係。原授權與設定持續保存。
+活動、搜尋、發票配對候選與收支統計僅排除 `status = 'pending'` 且
+`matched_transaction_id IS NOT NULL` 的授權；同 ID 升為已入帳仍正常顯示。
+不處理來源消失：未配對授權即使來源不再回傳，仍保留並顯示；空清單不刪除或隱藏資料。
+缺少清單或解析失敗不寫入；無有效卡與舊版解析不執行授權配對。
+已在舊版永久刪除的授權，若來源不再回傳，無法從此變更復原。
+
 ## 路由、排程與 challenge
 
-- 一般同步使用 `runConnectorSync`，不要在 route 或 scheduler 新增 connector switch。
+- 一般同步使用 `runConnectorSync`，不要在 route 或 scheduler 新增 connector switch。電子發票與集保的手動／排程入口使用各自的 durable-run service 啟動 Queue 流程。
 - 所有 scope 必須先宣告在 `connectorCatalog`；排程工作目前固定使用 `all`。
 - 同一 connector 的所有 scope 共用 canonical lock。
 - 需要 CAPTCHA／OTP 時，runtime registry 提供 `prepareChallenge`，route 只處理輸入驗證與 HTTP error mapping。
 - 排程不得主動寄送 OTP；需要互動時標記 `needs_user_action`。
 - 若外部服務支援接管其他登入中的裝置，必須明確定義手動與排程的 `force` policy，並在介面與使用文件提示可能中斷使用者目前的工作階段。
 - 新 connector 必須透過 D1 migration 建立 `<connectorId>:all` sync job，預設停用。
+
+### 集保分段同步
+
+集保與電子發票同樣使用 durable run。手動與排程入口呼叫 `startTdccSyncRun`，
+並 enqueue `run-tdcc-chunk`，不以一般單次同步流程取代分段處理。
+
+- `tdcc_sync_runs` 保存 run lifecycle、scope、設定版本及加密認證／session；
+  `tdcc_sync_run_items` 保存 `bank_page`、`trade_page` 工作與結果。
+- 手動啟動先初始化登入以處理 OTP；排程初始化不主動寄送 OTP。
+- 同一 connector 的所有 scope 共用 active run 限制與 canonical lock；每個 chunk
+  另取得 owner-scoped run lease，每次最多 claim 一個分頁 item，以 claim token
+  更新或釋放該 item，尚有工作時 enqueue continuation。
+- 分頁結果完成後彙整，透過一般 staging 與 promotion 寫入金融資料，並檢查設定版本、
+  更新 cursor；後續完成排程結果、手動完整同步的報告修復與 run 結案。
+- 暫時錯誤交給 Queue retry；需要互動或重試耗盡時終止。不得把每段 run lease 的
+  釋放當成整個 connector 同步完成。
+
+詳細流程與檔案責任參考[後端架構](002-backend-architecture.md#集保分段同步)。
 
 ### 電子發票分段明細同步
 

@@ -9,18 +9,18 @@
 ## 目錄
 
 - Tables：28
-- Explicit indexes：40
+- Explicit indexes：41
 - Other objects：0
-- Migrations：38
+- Migrations：40
 
 ## Tables
 
 | Table | 用途 | Columns | Foreign keys | Indexes |
 | --- | --- | ---: | ---: | ---: |
-| [`bank_accounts`](#bank_accounts) | 各銀行與信用卡連接器同步回來的帳戶主檔；同一個實體帳戶可能同時存在多個來源記錄。 | 14 | 1 | 1 |
+| [`bank_accounts`](#bank_accounts) | 各銀行與信用卡連接器同步回來的帳戶主檔；同一個實體帳戶可能同時存在多個來源記錄。 | 17 | 1 | 1 |
 | [`bank_balance_snapshots`](#bank_balance_snapshots) | 帳戶在特定時間點的餘額快照，供資產總值與歷史圖表計算。 | 15 | 1 | 2 |
 | [`bank_transaction_preferences`](#bank_transaction_preferences) | 使用者對銀行交易計算方式的個別偏好。 | 4 | 0 | 1 |
-| [`bank_transactions`](#bank_transactions) | 銀行帳戶、信用卡與其他存款型連接器同步回來的交易明細。 | 15 | 1 | 5 |
+| [`bank_transactions`](#bank_transactions) | 銀行帳戶、信用卡與其他存款型連接器同步回來的交易明細。 | 17 | 1 | 6 |
 | [`classification_categories`](#classification_categories) | 交易與發票使用的分類字典，包含系統預設分類與使用者分類。 | 6 | 0 | 1 |
 | [`classification_overrides`](#classification_overrides) | 使用者對單筆目標資料指定的分類覆寫。 | 6 | 1 | 1 |
 | [`classification_rules`](#classification_rules) | 以文字條件自動判斷交易或其他資料分類的規則。 | 14 | 1 | 2 |
@@ -69,6 +69,9 @@
 | 12 | `account_last4` | 帳號末四碼，用於顯示與帳戶比對。 | TEXT | YES | — | — | — |
 | 13 | `canonical_account_id` | 指向同一實體的主要帳戶；NULL 表示此記錄本身就是主要帳戶。 | TEXT | YES | — | — | — |
 | 14 | `credit_limit` | 信用卡或授信帳戶的額度；非授信帳戶通常為 NULL。 | INTEGER | YES | — | — | — |
+| 15 | `opened_date` | 銀行提供的定存起息日；來源未提供時為 NULL。 | TEXT | YES | — | — | — |
+| 16 | `maturity_date` | 銀行提供的定存到期日；不作為自動結清的判定條件。 | TEXT | YES | — | — | — |
+| 17 | `inactive_at` | 同步確認來源不再列出定存的觀測時間，不是銀行實際結清日；有效帳戶為 NULL。 | TEXT | YES | — | — | — |
 
 #### Foreign keys
 
@@ -102,7 +105,7 @@ CREATE TABLE "bank_accounts" (
   bank_code TEXT,
   account_last4 TEXT,
   canonical_account_id TEXT REFERENCES "bank_accounts" (id),
-  credit_limit INTEGER,
+  credit_limit INTEGER, opened_date TEXT, maturity_date TEXT, inactive_at TEXT,
   UNIQUE (connector_id, source_id)
 )
 ```
@@ -227,6 +230,8 @@ CREATE TABLE bank_transaction_preferences (
 | 13 | `updated_at` | 交易最後更新的時間。 | TEXT | NO | — | — | — |
 | 14 | `effective_date` | 由 posted_date 優先、authorized_at 備援產生的查詢排序日期。 | TEXT | YES | — | — | virtual |
 | 15 | `status` | 交易狀態，目前限制為 pending 或 posted。 | TEXT | NO | 'posted' | — | — |
+| 16 | `transfer_peer_id` | 定存衍生活動所配對之活存交易的系統識別碼，供本金轉帳一對一配對；沒有明確配對時為 NULL。 | TEXT | YES | — | — | — |
+| 17 | `matched_transaction_id` | 授權對應的已入帳交易 ID，一對一；僅隱藏 pending 且已配對的交易，同 ID 入帳可指向自身。 | TEXT | YES | — | — | — |
 
 #### Foreign keys
 
@@ -238,6 +243,7 @@ CREATE TABLE bank_transaction_preferences (
 
 | Index | Unique | Partial | 欄位 | 定義 |
 | --- | :---: | :---: | --- | --- |
+| `idx_bank_transactions_matched_transaction` | 是 | 是 | `matched_transaction_id` | `CREATE UNIQUE INDEX idx_bank_transactions_matched_transaction<br>  ON bank_transactions(matched_transaction_id)<br>  WHERE matched_transaction_id IS NOT NULL` |
 | `idx_bank_transactions_transaction_day` | 否 | 否 | — | `CREATE INDEX idx_bank_transactions_transaction_day<br>  ON bank_transactions (<br>    CASE<br>      WHEN length(authorized_at) > 10<br>        THEN COALESCE(<br>          date(authorized_at, '+8 hours'),<br>          substr(authorized_at, 1, 10)<br>        )<br>      ELSE substr(COALESCE(authorized_at, posted_date), 1, 10)<br>    END<br>  )` |
 | `idx_bank_transactions_status` | 否 | 否 | `connector_id`, `account_id`, `status` | `CREATE INDEX idx_bank_transactions_status<br>  ON bank_transactions (connector_id, account_id, status)` |
 | `idx_bank_transactions_effective_updated` | 否 | 否 | `effective_date`, `updated_at`, `id` | `CREATE INDEX idx_bank_transactions_effective_updated<br>  ON bank_transactions (effective_date DESC, updated_at DESC, id DESC)` |
@@ -262,7 +268,7 @@ CREATE TABLE "bank_transactions" (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   effective_date TEXT AS (COALESCE(posted_date, authorized_at, '')),
-  status TEXT NOT NULL DEFAULT 'posted' CHECK (status IN ('pending', 'posted')),
+  status TEXT NOT NULL DEFAULT 'posted' CHECK (status IN ('pending', 'posted')), transfer_peer_id TEXT, matched_transaction_id TEXT,
   UNIQUE (connector_id, account_id, source_id)
 )
 ```
@@ -1537,6 +1543,8 @@ Migration 是 schema 演進的 source of truth；若要了解某欄位的變更�
 - [`0038_add_default_classification_categories.sql`](../packages/db/migrations/0038_add_default_classification_categories.sql)
 - [`0039_add_default_classification_rules.sql`](../packages/db/migrations/0039_add_default_classification_rules.sql)
 - [`0040_bank_transaction_day_index.sql`](../packages/db/migrations/0040_bank_transaction_day_index.sql)
+- [`0041_time_deposit_lifecycle.sql`](../packages/db/migrations/0041_time_deposit_lifecycle.sql)
+- [`0042_bank_transaction_lifecycle.sql`](../packages/db/migrations/0042_bank_transaction_lifecycle.sql)
 
 ## 程式碼導覽
 
