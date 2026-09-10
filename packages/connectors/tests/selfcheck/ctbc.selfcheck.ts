@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { BANK_SYNC_MONTHS } from "../../src/sync-window";
-import { parseCtbcConfig, parseCtbcData } from "../../src/ctbc";
+import {
+  ctbcTransactionsMatch,
+  parseCtbcConfig,
+  parseCtbcData,
+} from "../../src/ctbc";
 
 assert.deepEqual(
   parseCtbcConfig({
@@ -91,7 +95,7 @@ const payloads = {
                 postingDt: "2026/07/10",
                 merchantChiName: "測試商店",
                 occCurCode: "TWD",
-                authCode: "AUTH-CARD-001",
+                authCode: "AUTH001",
                 foreignAmt: "350",
                 clearingDt: "2026/07/10",
                 purchaseCountry: "TW",
@@ -240,5 +244,106 @@ assert.doesNotMatch(
   /123456789012|987654321000|987654321001|4111111111113108|A123456789|AUTH-CARD-001|AUTH001|ACW-REF-001|MERCHANT-ACCOUNT|MERCHANT-1/,
 );
 assert.match(serialized, /3108/);
+
+// Shapes observed in the App: MMDDYY statements and YYYYMMDD unbilled rows.
+const observed = structuredClone(payloads);
+const statement = observed.creditCards.rsData.billData.TWD["202607"];
+statement.summary.billDt = "072026";
+statement.summary.pmtExpDt = "080526";
+statement.bills[0]!.purchaseDt = "070826";
+statement.bills[0]!.postingDt = "071026";
+statement.bills[0]!.clearingDt = "000000";
+const fixed = parseCtbcData(observed);
+assert.equal(fixed.bankTransactions[2]!.postedDate, "2026-07-10");
+assert.equal(
+  fixed.bankTransactions[2]!.authorizedAt,
+  "2026-07-08T12:00:00+08:00",
+);
+assert.equal(fixed.creditCardBills[0]!.paymentDueDate, "2026-08-05");
+assert.equal(fixed.bankBalanceSnapshots[1]!.statementClosingDate, "2026-07-20");
+assert.ok(
+  (fixed.bankTransactions[2]!.raw as Record<string, unknown>).legacySourceId,
+);
+const unbilled = parseCtbcData({
+  ...observed,
+  creditCards: {},
+  unbilled: {
+    rsData: {
+      allItems: [
+        {
+          purchaseDt: "20260708",
+          postingDt: "20260710",
+          purchaseAmt: 350,
+          description: "銀行正式商家名稱",
+          sourceCurrency: "TWD",
+          cardNoSuffixFour: "3108",
+          authCode: "AUTH001",
+          acwRefNbr: "REFERENCE-1",
+        },
+      ],
+    },
+  },
+});
+const purchase = unbilled.bankTransactions.find(
+  (t) => t.status === "posted" && t.amount === -350,
+)!;
+assert.equal(purchase.description, "銀行正式商家名稱");
+assert.equal(purchase.authorizedAt, "2026-07-08T12:00:00+08:00");
+assert.equal(purchase.sourceId, result.bankTransactions[2]!.sourceId);
+assert.doesNotMatch(JSON.stringify(unbilled), /AUTH001|REFERENCE-1/);
+
+// Conflicting authorization codes and duplicate candidates cannot be merged.
+const conflict = structuredClone(observed);
+conflict.creditCards.rsData.billData.TWD["202607"].bills[0]!.authCode =
+  "DIFFERENT";
+assert.equal(
+  parseCtbcData(conflict).bankTransactions.filter((t) => t.status === "pending")
+    .length,
+  2,
+);
+const ambiguous = structuredClone(observed);
+ambiguous.creditCards.rsData.billData.TWD["202607"].bills.push({
+  ...statement.bills[0]!,
+});
+assert.equal(
+  parseCtbcData(ambiguous).bankTransactions.filter(
+    (t) => t.status === "pending",
+  ).length,
+  2,
+);
+
+const midnight = structuredClone(observed);
+midnight.realtime.rsData.allItems[0]!.txnDateTime = "2026-07-07T16:30:00.000Z";
+assert.equal(
+  parseCtbcData(midnight).bankTransactions[2]!.authorizedAt,
+  "2026-07-07T16:30:00.000Z",
+);
+const invalidDate = structuredClone(observed);
+invalidDate.creditCards.rsData.billData.TWD["202607"].bills[0]!.purchaseDt =
+  "invalid";
+invalidDate.creditCards.rsData.billData.TWD["202607"].bills[0]!.postingDt =
+  "000000";
+assert.throws(() => parseCtbcData(invalidDate), /日期或金額/);
+
+const matchBase = {
+  amount: -350,
+  currency: "TWD",
+  description: "測試商店",
+  raw: { cardLast4: "3108" },
+};
+assert.equal(
+  ctbcTransactionsMatch(
+    { ...matchBase, authorizedAt: "2026-07-08T12:00:00+08:00" },
+    { ...matchBase, authorizedAt: undefined, postedDate: undefined },
+  ),
+  true,
+);
+assert.equal(
+  ctbcTransactionsMatch(
+    { ...matchBase, authorizedAt: "2026-07-08T12:00:00+08:00" },
+    { ...matchBase, authorizedAt: "2026-07-09" },
+  ),
+  false,
+);
 
 console.log("CTBC connector self-check passed.");
