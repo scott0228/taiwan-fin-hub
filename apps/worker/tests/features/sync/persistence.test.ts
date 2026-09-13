@@ -29,6 +29,18 @@ import {
   reconcileSinopacLegacyTransactionStatements,
 } from "../../../src/features/sync/repository";
 
+/** This Node sqlite bind API only accepts anonymous `?`; expand D1 `?1` placeholders. */
+function expandNumberedParams(sql: string, values: unknown[]) {
+  const expanded: unknown[] = [];
+  const rewritten = sql.replace(/\?(\d+)/g, (_, index) => {
+    expanded.push(values[Number(index) - 1]);
+    return "?";
+  });
+  return expanded.length > 0
+    ? { sql: rewritten, values: expanded }
+    : { sql, values };
+}
+
 class SqliteStatement {
   private values: unknown[] = [];
 
@@ -50,29 +62,41 @@ class SqliteStatement {
     return this.execute() as unknown as { results: T[] };
   }
 
+  async raw() {
+    this.owner.executedSql.push(this.sql);
+    const query = expandNumberedParams(this.sql, this.values);
+    return (
+      this.owner.database
+        .prepare(query.sql)
+        .all(...(query.values as never[])) as Record<string, unknown>[]
+    ).map((row) => Object.values(row));
+  }
+
   async first<T>() {
     this.owner.executedSql.push(this.sql);
+    const query = expandNumberedParams(this.sql, this.values);
     return (
       (this.owner.database
-        .prepare(this.sql)
-        .get(...(this.values as never[])) as T) ?? null
+        .prepare(query.sql)
+        .get(...(query.values as never[])) as T) ?? null
     );
   }
 
   execute() {
     this.owner.executedSql.push(this.sql);
-    if (/^\s*(SELECT|WITH)\b/i.test(this.sql)) {
+    const query = expandNumberedParams(this.sql, this.values);
+    if (/^\s*(SELECT|WITH)\b/i.test(query.sql)) {
       return {
         success: true,
         meta: { changes: 0 },
         results: this.owner.database
-          .prepare(this.sql)
-          .all(...(this.values as never[])),
+          .prepare(query.sql)
+          .all(...(query.values as never[])),
       };
     }
     const result = this.owner.database
-      .prepare(this.sql)
-      .run(...(this.values as never[]));
+      .prepare(query.sql)
+      .run(...(query.values as never[]));
     return {
       success: true,
       meta: { changes: Number(result.changes) },
@@ -349,7 +373,7 @@ describe("staged sync persistence", () => {
     ).toEqual({ canonicalAccountId: "skbank-direct" });
   });
 
-  it("migrates preferences and removes E.SUN lifecycle shadow transactions", async () => {
+  it("preserves E.SUN lifecycle shadows when multiple old rows match one transaction", async () => {
     const db = createDb();
     db.database.exec(`
       INSERT INTO bank_accounts
@@ -382,19 +406,22 @@ describe("staged sync persistence", () => {
         .prepare("SELECT id FROM bank_transactions ORDER BY id")
         .all()
         .map((row) => row.id),
-    ).toEqual(["canonical"]);
+    ).toEqual(["canonical", "shadow-pending", "shadow-posted"]);
     expect(
       db.database
         .prepare(
           "SELECT transaction_id, excluded_from_calculation FROM bank_transaction_preferences",
         )
         .get(),
-    ).toEqual({ transaction_id: "canonical", excluded_from_calculation: 1 });
+    ).toEqual({
+      transaction_id: "shadow-posted",
+      excluded_from_calculation: 1,
+    });
     expect(
       db.database
         .prepare("SELECT target_id, category_id FROM classification_overrides")
         .get(),
-    ).toEqual({ target_id: "canonical", category_id: "shopping" });
+    ).toEqual({ target_id: "shadow-posted", category_id: "shopping" });
   });
 
   it("merges the E.SUN single-card summary account into the physical card", async () => {
@@ -557,6 +584,9 @@ describe("staged sync persistence", () => {
         "INSERT INTO classification_overrides VALUES ('ctbc-category', 'bank_transaction', ?, 'shopping', 'now', 'now')",
       )
       .run(pending.recordKey);
+    db.database.exec(
+      "INSERT INTO invoices (id, connector_id, source_id, invoice_date, amount, created_at, updated_at) VALUES ('ctbc-invoice', 'einvoice', 'ctbc-invoice', '2026-09-13', 100, 'now', 'now')",
+    );
     db.database
       .prepare(
         "INSERT INTO invoice_transaction_preferences VALUES ('ctbc-invoice', ?, 'linked', 'now', 'now')",
@@ -682,6 +712,9 @@ describe("staged sync persistence", () => {
       await persistStagedSyncWrite(d1, {
         records: [bankAccountRecord(0), authorization, posted],
       });
+      db.database.exec(
+        "INSERT INTO invoices (id, connector_id, source_id, invoice_date, amount, created_at, updated_at) VALUES ('retained-invoice', 'einvoice', 'retained-invoice', '2026-09-13', 100, 'now', 'now')",
+      );
       db.database
         .prepare(
           "INSERT INTO invoice_transaction_preferences VALUES ('retained-invoice', ?, 'linked', 'now', 'now')",
@@ -1156,6 +1189,9 @@ describe("staged sync persistence", () => {
         "INSERT INTO classification_overrides VALUES ('next', 'bank_transaction', ?, 'shopping', 'now', 'now')",
       )
       .run(nextPending.recordKey);
+    db.database.exec(
+      "INSERT INTO invoices (id, connector_id, source_id, invoice_date, amount, created_at, updated_at) VALUES ('invoice-next', 'einvoice', 'invoice-next', '2026-09-13', 100, 'now', 'now')",
+    );
     db.database
       .prepare(
         "INSERT INTO invoice_transaction_preferences VALUES ('invoice-next', ?, 'linked', 'now', 'now')",
@@ -1245,7 +1281,7 @@ describe("staged sync persistence", () => {
     ).toEqual({ targetId: "sinopac-canonical" });
   });
 
-  it("migrates preferences and removes garbled HNCB transaction ids", async () => {
+  it("merges matching HNCB transaction ids and preserves unmatched history", async () => {
     const db = createDb();
     db.database.exec(`
       INSERT INTO bank_accounts
@@ -1278,7 +1314,7 @@ describe("staged sync persistence", () => {
         .prepare("SELECT id FROM bank_transactions ORDER BY id")
         .all()
         .map((row) => row.id),
-    ).toEqual(["hncb-canonical"]);
+    ).toEqual(["hncb-canonical", "hncb-orphan"]);
     expect(
       db.database
         .prepare(
