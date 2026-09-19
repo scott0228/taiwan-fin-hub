@@ -1803,3 +1803,122 @@ test("loads invoice line items only after opening an activity", async ({
   await expect(page.getByText("延遲載入品項", { exact: true })).toBeVisible();
   expect(detailRequests).toBe(1);
 });
+
+test.describe("mobile chart tooltip", () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test("dismisses on scroll and allows selecting a point again", async ({
+    page,
+  }) => {
+    await page.route("**/api/history/net-worth/chart", async (route) => {
+      await route.fulfill({
+        json: [
+          {
+            date: "2026-08-13",
+            netWorth: 2000000,
+            assetType: "deposit",
+            source: "bank",
+          },
+          {
+            date: "2026-08-14",
+            netWorth: 2200000,
+            assetType: "deposit",
+            source: "bank",
+          },
+        ],
+      });
+    });
+    await page.goto("/#/overview");
+    await page.getByRole("tab", { name: "全部", exact: true }).click();
+    const chart = page
+      .getByRole("region", { name: "資產走勢" })
+      .locator("[data-chart]");
+    await chart.scrollIntoViewIfNeeded();
+    await chart.tap({ position: { x: 150, y: 100 } });
+    const tooltip = page.locator(".lc-tooltip-root");
+    await expect(tooltip).toBeVisible();
+    await page.evaluate(() => window.scrollBy(0, 120));
+    await expect(tooltip).toBeHidden();
+    await chart.scrollIntoViewIfNeeded();
+    await chart.tap({ position: { x: 150, y: 100 } });
+    await expect(tooltip).toBeVisible();
+    await chart.dispatchEvent("pointercancel", { pointerType: "touch" });
+    await expect(tooltip).toBeHidden();
+  });
+});
+
+test("sets double-tap protection before app scripts and styles load", async ({
+  page,
+}) => {
+  await page.route("**/*", async (route) => {
+    if (["script", "stylesheet"].includes(route.request().resourceType())) {
+      await route.abort();
+      return;
+    }
+    await route.fallback();
+  });
+  await page.goto("/");
+  for (const selector of ["html", "body", "#root"]) {
+    await expect(page.locator(selector)).toHaveCSS(
+      "touch-action",
+      "manipulation",
+    );
+  }
+  await expect(page.locator("html")).not.toHaveClass(/is-standalone/);
+});
+
+test("focuses asset categories without changing their total", async ({
+  page,
+}) => {
+  await page.route("**/api/history/net-worth/chart", async (route) => {
+    await route.fulfill({
+      json: [
+        {
+          date: "2026-08-13",
+          netWorth: 1800000,
+          assetType: "stock",
+          source: "investment",
+        },
+        {
+          date: "2026-08-14",
+          netWorth: 1900000,
+          assetType: "stock",
+          source: "investment",
+        },
+        {
+          date: "2026-08-13",
+          netWorth: 350000,
+          assetType: "deposit",
+          source: "bank",
+        },
+        {
+          date: "2026-08-14",
+          netWorth: 380000,
+          assetType: "deposit",
+          source: "bank",
+        },
+      ],
+    });
+  });
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await page.goto("/#/overview");
+  const chart = page.getByRole("region", { name: "資產走勢" });
+  await page.getByRole("tab", { name: "全部", exact: true }).click();
+  await page.getByRole("button", { name: "顯示設定" }).click();
+  await page.getByRole("tab", { name: "分類", exact: true }).click();
+  const legend = page.getByLabel("分類資產圖例");
+  const stocks = legend.getByRole("button", { name: "股票/ETF NT$1,900,000" });
+  await expect(legend.getByRole("button")).toHaveCount(2);
+  await expect(chart.locator("g[opacity] > path")).toHaveCount(2);
+  await stocks.click();
+  await expect(stocks).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    chart.locator("p").filter({ hasText: "NT$2,280,000" }),
+  ).toBeVisible();
+  await expect(chart.locator('g[opacity="0.2"]')).toHaveCount(1);
+  await chart.locator("[data-chart]").hover({ position: { x: 180, y: 100 } });
+  await expect(page.locator(".lc-tooltip-root")).toContainText("股票/ETF");
+  await stocks.click();
+  await expect(stocks).toHaveAttribute("aria-pressed", "false");
+  await expect(chart.locator('g[opacity="0.2"]')).toHaveCount(0);
+});
