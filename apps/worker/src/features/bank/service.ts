@@ -44,10 +44,15 @@ export async function getBankPage(
   };
 }
 
-export async function getBankRange(db: D1Database, range: MonthDateRange) {
+export async function getBankRange(
+  db: D1Database,
+  range: MonthDateRange,
+  days?: string[],
+  accountRows?: Awaited<ReturnType<typeof listBankAccounts>>,
+) {
   const [accounts, transactions] = await Promise.all([
-    listBankAccounts(db),
-    listBankTransactionsInRange(db, range),
+    accountRows ? Promise.resolve(accountRows) : listBankAccounts(db),
+    listBankTransactionsInRange(db, range, days),
   ]);
   return {
     accounts: accounts.map(normalizeBankAccountDisplay),
@@ -74,6 +79,7 @@ async function presentBankTransactions(
         description: transaction.description,
         counterparty: transaction.counterparty,
         sourceId: transaction.sourceId,
+        amount: transaction.amount,
       })),
     );
   } catch (error) {
@@ -124,6 +130,7 @@ async function presentBankTransactions(
       return {
         ...normalizeBankTransactionDisplay(transaction),
         excludedFromCalculation: resolveCalculationExclusion({
+          transferPeerId: transaction.transferPeerId,
           accountType: transaction.accountType,
           description: transaction.description,
           counterparty: transaction.counterparty,

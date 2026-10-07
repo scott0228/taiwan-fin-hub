@@ -1,11 +1,14 @@
 <script lang="ts">
+  import type { ApiClient } from "@/shared/api/client";
+  import { toStore } from "svelte/store";
+  import { createQuery } from "@tanstack/svelte-query";
+  import SyncActivityDetails from "./SyncActivityDetails.svelte";
   import { CircleCheckBig, RefreshCw, TriangleAlert } from "@lucide/svelte";
   import {
     connectorCatalog,
     type ScheduledSyncReport,
-  } from "@taiwan-fin-hub/core";
-  import Card from "@/shared/ui/Card.svelte";
-  import CardContent from "@/shared/ui/CardContent.svelte";
+  } from "@taiwan-fin-hub/shared";
+  import { syncReportActivitiesQuery } from "@/data/sync-reports/queries";
   import { formatCurrency, formatDateTime } from "@/shared/format/financial";
   import {
     financialChangeUnavailableMessage,
@@ -18,9 +21,13 @@
 
   let {
     report,
+    api,
     loading = false,
-  }: { report: ScheduledSyncReport | null | undefined; loading?: boolean } =
-    $props();
+  }: {
+    report: ScheduledSyncReport | null | undefined;
+    api: ApiClient;
+    loading?: boolean;
+  } = $props();
 
   const presentation = $derived(
     report ? syncReportStatusPresentation(report) : null,
@@ -74,6 +81,16 @@
         ]
       : [],
   );
+  let sourcesOpen = $state(false);
+  const activities = createQuery(
+    toStore(() =>
+      syncReportActivitiesQuery(
+        () => api,
+        report?.id ?? "",
+        Boolean(report?.id) && sourcesOpen,
+      ),
+    ),
+  );
 
   function formatFinancialChange(value: number) {
     const amount = formatCurrency(Math.abs(value));
@@ -107,16 +124,19 @@
 
 {#if loading}
   <div aria-busy="true">
-    <Card>
-      <CardContent class="flex min-h-32 items-center gap-3 p-5 text-ink/50">
-        <RefreshCw class="size-5 animate-spin" />
-        <p class="text-sm font-medium">讀取最近同步結果中</p>
-      </CardContent>
-    </Card>
+    <div
+      class="flex min-h-20 items-center gap-3 border-t border-ink/10 pt-5 text-subtle"
+    >
+      <RefreshCw class="size-5 animate-spin" />
+      <p class="text-sm font-medium">讀取最近同步結果中</p>
+    </div>
   </div>
 {:else if report && presentation}
-  <Card as="section" class="overflow-hidden">
-    <CardContent class="grid gap-5 p-5 md:p-6">
+  <section
+    aria-label="最近一次排程同步"
+    class="min-w-0 border-t border-ink/10 pt-6"
+  >
+    <div class="grid gap-5">
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div class="flex min-w-0 items-start gap-3">
           <span
@@ -129,13 +149,15 @@
             {/if}
           </span>
           <div class="min-w-0">
-            <p class="text-xs font-semibold text-ink/45">最近一次同步</p>
-            <h2 class="mt-1 text-lg font-semibold">{presentation.label}</h2>
-            <p class="mt-1 text-xs text-ink/50">
+            <p class="text-caption font-semibold text-subtle">
+              最近一次排程同步
+            </p>
+            <h2 class="mt-1 text-base font-semibold">{presentation.label}</h2>
+            <p class="mt-1 text-caption text-subtle">
               {presentation.description}
             </p>
             {#if recoveryMessage}
-              <p class="mt-1 text-xs font-medium text-moss">
+              <p class="mt-1 text-caption font-medium text-moss">
                 已於 {formatDateTime(recoveryMessage)} 手動{report.status ===
                 "success"
                   ? "補齊"
@@ -145,20 +167,20 @@
           </div>
         </div>
         <time
-          class="text-xs font-medium text-ink/45"
+          class="text-caption font-medium text-subtle"
           datetime={report.completedAt}
           >{formatDateTime(report.completedAt)}</time
         >
       </div>
 
-      <div class="grid gap-3 md:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
-        <div class="rounded-xl bg-paper p-4">
-          <p class="text-xs font-semibold text-ink/50">新增資料</p>
+      <div class="grid gap-5 md:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+        <div class="min-w-0 py-1">
+          <p class="text-caption font-semibold text-subtle">新增資料</p>
           <div class="mt-3 grid grid-cols-3 gap-2">
             {#each newRecordItems as item (item.label)}
               <div class="min-w-0">
-                <p class="text-xl font-bold tabular-nums">{item.value}</p>
-                <p class="mt-1 truncate text-[11px] text-ink/45">
+                <p class="text-lg font-medium tabular-nums">{item.value}</p>
+                <p class="mt-1 truncate text-xs text-subtle">
                   {item.label}
                 </p>
               </div>
@@ -167,10 +189,12 @@
         </div>
 
         {#if report.financialChange}
-          <div class="rounded-xl border border-border/80 p-4">
-            <p class="text-xs font-semibold text-ink/50">同步後變化</p>
+          <div
+            class="min-w-0 border-t border-ink/8 pt-4 md:border-t-0 md:border-l md:pl-6 md:pt-1"
+          >
+            <p class="text-caption font-semibold text-subtle">同步後變化</p>
             {#if financialChangeScope}
-              <p class="mt-1 text-[11px] leading-relaxed text-amber-800">
+              <p class="mt-1 text-xs leading-relaxed text-amber-800">
                 {financialChangeScope}
               </p>
             {/if}
@@ -184,12 +208,12 @@
                   class="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-baseline gap-3 sm:block"
                 >
                   <p
-                    class={`col-start-2 row-start-1 whitespace-nowrap text-right text-base font-bold tabular-nums sm:text-left sm:text-lg ${change.tone === "positive" ? "text-moss" : change.tone === "negative" ? "text-coral" : "text-ink"}`}
+                    class={`col-start-2 row-start-1 whitespace-nowrap text-right text-base font-medium tabular-nums sm:text-left sm:text-lg ${change.tone === "positive" ? "text-moss" : change.tone === "negative" ? "text-coral" : "text-ink"}`}
                   >
                     {formatFinancialChange(item.value)}
                   </p>
                   <p
-                    class="col-start-1 row-start-1 truncate text-[11px] text-ink/45 sm:mt-1"
+                    class="col-start-1 row-start-1 truncate text-xs text-subtle sm:mt-1"
                   >
                     {item.label}
                   </p>
@@ -202,7 +226,7 @@
             class="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-amber-900"
           >
             <TriangleAlert class="size-5 shrink-0" />
-            <p class="text-xs font-medium leading-relaxed">
+            <p class="text-caption font-medium leading-relaxed">
               {unavailableMessage}
             </p>
           </div>
@@ -214,41 +238,54 @@
           class="flex items-start gap-2 rounded-lg bg-amber-50/70 px-3 py-2.5 text-amber-900"
         >
           <TriangleAlert class="mt-0.5 size-4 shrink-0" />
-          <p class="text-xs font-medium leading-relaxed">{zeroRateMessage}</p>
+          <p class="text-caption font-medium leading-relaxed">
+            {zeroRateMessage}
+          </p>
         </div>
       {/if}
 
       {#if report.sources.length > 0}
-        <details class="group border-t border-border/70 pt-4">
+        <details
+          bind:open={sourcesOpen}
+          class="group border-t border-border/70 pt-4"
+        >
           <summary
-            class="cursor-pointer list-none text-xs font-semibold text-steel marker:content-none"
+            class="cursor-pointer list-none text-caption font-semibold text-steel marker:content-none"
           >
             <span class="group-open:hidden">查看各資料來源</span>
             <span class="hidden group-open:inline">收合各資料來源</span>
           </summary>
           <div class="mt-3 grid gap-2">
-            {#each report.sources as source (source.connectorId)}
-              <div
-                class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-lg bg-paper px-3 py-2.5"
-              >
-                <div class="min-w-0">
-                  <p class="truncate text-xs font-semibold">
-                    {connectorCatalog[source.connectorId].title}
-                  </p>
-                  <p class="mt-0.5 text-[11px] text-ink/45">
-                    {sourceNewRecordSummary(source)}
-                  </p>
-                </div>
-                <span
-                  class={`text-xs font-semibold ${source.status === "success" ? "text-moss" : "text-amber-700"}`}
+            {#each report.sources as source (`${report.id}:${source.connectorId}`)}
+              <div class="border-b border-ink/8 py-3 last:border-b-0">
+                <div
+                  class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1"
                 >
-                  {sourceStatusLabel(source.status)}
-                </span>
+                  <div class="min-w-0">
+                    <p class="truncate text-caption font-semibold">
+                      {connectorCatalog[source.connectorId].title}
+                    </p>
+                    <p class="mt-0.5 text-xs text-subtle">
+                      {sourceNewRecordSummary(source)}
+                    </p>
+                  </div>
+                  <span
+                    class={`text-caption font-semibold ${source.status === "success" ? "text-moss" : "text-amber-700"}`}
+                  >
+                    {sourceStatusLabel(source.status)}
+                  </span>
+                </div>
+                <SyncActivityDetails
+                  page={$activities.data?.sources[source.connectorId]}
+                  loading={$activities.isPending}
+                  failed={$activities.isError}
+                  onRetry={() => $activities.refetch()}
+                />
               </div>
             {/each}
           </div>
         </details>
       {/if}
-    </CardContent>
-  </Card>
+    </div>
+  </section>
 {/if}

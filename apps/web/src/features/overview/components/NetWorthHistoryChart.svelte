@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ArrowDownLeft, ArrowUpRight, TrendingUp } from "@lucide/svelte";
-  import { LineChart } from "layerchart";
-  import Card from "@/shared/ui/Card.svelte";
-  import CardContent from "@/shared/ui/CardContent.svelte";
-  import CardHeader from "@/shared/ui/CardHeader.svelte";
+  import {
+    ArrowDownLeft,
+    ArrowUpRight,
+    ChevronDown,
+    TrendingUp,
+  } from "@lucide/svelte";
+  import { Area, LineChart, Spline } from "layerchart";
   import TabsList from "@/shared/ui/TabsList.svelte";
   import TabsTrigger from "@/shared/ui/TabsTrigger.svelte";
   import {
@@ -37,6 +39,8 @@
     loading = false,
   }: { data?: NetWorthHistoryRow[]; loading?: boolean } = $props();
 
+  const uid = $props.id();
+  const gradientId = `net-worth-fill-${uid.replace(/:/g, "")}`;
   const storageKey = "taiwan-fin-hub-net-worth-chart-included-assets";
   const timeframes: NetWorthTimeframe[] = ["1M", "3M", "6M", "1Y", "ALL"];
   const chartConfig: ChartConfig = {
@@ -50,6 +54,8 @@
   let includedAssets = $state<NetWorthAssetType[]>([
     ...NET_WORTH_DEFAULT_ASSETS,
   ]);
+  let focusedAsset = $state<NetWorthAssetType | null>(null);
+  let settingsOpen = $state(false);
   let timeframe = $state<NetWorthTimeframe>("1Y");
   let displayMode = $state<NetWorthDisplayMode>("sum");
   let comparisonPeriod = $state<NetWorthComparisonPeriod>("day");
@@ -75,6 +81,17 @@
       (option) => option.key === comparisonPeriod,
     ),
   );
+  const selectedSeries = $derived(
+    NET_WORTH_ASSET_SERIES.filter(
+      ({ key }) => includedAssets.includes(key) && availableAssets.has(key),
+    ),
+  );
+  const activeFocus = $derived(
+    displayMode === "breakdown" &&
+      selectedSeries.some(({ key }) => key === focusedAsset)
+      ? focusedAsset
+      : null,
+  );
   const chartSeries = $derived(
     displayMode === "sum"
       ? [
@@ -85,23 +102,12 @@
             color: "var(--color-selectedTotal)",
           },
         ]
-      : [
-          ...NET_WORTH_ASSET_SERIES.filter(({ key }) =>
-            includedAssets.includes(key),
-          ).map(({ key, label }) => ({
-            key,
-            label,
-            value: key,
-            color: `var(--color-${key})`,
-          })),
-          {
-            key: "selectedTotal",
-            label: "總和",
-            value: "selectedTotal",
-            color: "var(--color-selectedTotal)",
-            props: { "stroke-dasharray": "6 4", strokeWidth: 2.5 },
-          },
-        ],
+      : selectedSeries.map(({ key, label }) => ({
+          key,
+          label,
+          value: key,
+          color: `var(--color-${key})`,
+        })),
   );
 
   onMount(() => {
@@ -143,6 +149,7 @@
 
 {#snippet chartTooltip()}
   <ChartTooltip
+    focusedKey={activeFocus}
     indicator={displayMode === "sum" ? "dot" : "line"}
     labelFormatter={(value) =>
       formatDate(value instanceof Date ? value.toISOString() : String(value))}
@@ -150,23 +157,65 @@
   />
 {/snippet}
 
-<Card class="min-w-0 max-w-full overflow-hidden">
-  <CardHeader class="gap-3 p-4 md:p-5">
-    <div class="flex flex-wrap items-center justify-between gap-3">
-      <div class="flex flex-wrap items-center gap-3">
-        <h2 class="flex items-center gap-2 text-base font-semibold">
-          <TrendingUp class="size-4 text-steel" />資產走勢
-        </h2>
+<section class="min-w-0 max-w-full" aria-label="資產走勢">
+  <div class="grid gap-3 pb-3">
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+      <h2 class="flex items-center gap-2 text-base font-semibold">
+        <TrendingUp class="size-4 text-steel" />資產走勢
+      </h2>
+      {#if chartData.length > 0}
+        <span
+          class={`inline-flex items-center gap-1 py-1 text-caption font-semibold ${changeValue >= 0 ? "text-moss" : "text-coral"}`}
+        >
+          {#if changeValue >= 0}<ArrowUpRight
+              class="size-3.5"
+            />{:else}<ArrowDownLeft class="size-3.5" />{/if}
+          {changePercent >= 0 ? "+" : ""}{changePercent.toFixed(1)}%
+        </span>
+      {/if}
+    </div>
+    <div class="flex flex-wrap items-start justify-between gap-x-2 gap-y-3">
+      <div class="min-w-0">
+        <TabsList
+          aria-label="資產走勢期間"
+          class="grid h-11 grid-cols-5 gap-1 rounded-lg border-0 bg-ink/5 p-0.5 text-caption"
+        >
+          {#each timeframes as option (option)}
+            <TabsTrigger
+              class={`h-10 cursor-pointer rounded-md px-2.5 py-1 text-sm font-semibold shadow-none ${timeframe === option ? "bg-steel text-white" : "text-subtle hover:bg-ink/5 hover:text-ink"}`}
+              active={timeframe === option}
+              onclick={() => (timeframe = option)}
+              >{option === "ALL" ? "全部" : option}</TabsTrigger
+            >
+          {/each}
+        </TabsList>
+      </div>
+      <button
+        type="button"
+        aria-expanded={settingsOpen}
+        aria-controls="net-worth-display-settings"
+        onclick={() => (settingsOpen = !settingsOpen)}
+        class="flex min-h-10 cursor-pointer items-center gap-1.5 text-caption text-subtle"
+      >
+        顯示設定 <ChevronDown
+          class={`size-3.5 transition-transform ${settingsOpen ? "rotate-180" : ""}`}
+        />
+      </button>
+      <div
+        id="net-worth-display-settings"
+        hidden={!settingsOpen}
+        class="flex basis-full flex-wrap [&[hidden]]:hidden items-center justify-between gap-3 border-t border-ink/5 pt-3"
+      >
         <div
           class="flex flex-wrap items-center gap-1.5"
           aria-label="資產類型篩選"
         >
-          <span class="text-xs font-medium text-ink/40">包含</span>
+          <span class="text-caption font-medium text-subtle">包含</span>
           {#each NET_WORTH_ASSET_SERIES as option (option.key)}
             {@const active = includedAssets.includes(option.key)}
             {@const available = availableAssets.has(option.key)}
             <button
-              class={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition ${active && available ? "border-ink/15 bg-white text-ink shadow-xs" : "border-ink/8 bg-paper text-ink/45"} ${available ? "hover:border-steel/25 hover:text-steel" : "cursor-not-allowed opacity-40"}`}
+              class={`flex items-center gap-1.5 rounded-md px-2 py-2 text-caption font-medium transition ${active && available ? "bg-ink/5 text-ink" : "bg-transparent text-subtle"} ${available ? "hover:bg-ink/5 hover:text-steel" : "cursor-not-allowed opacity-40"}`}
               disabled={!available}
               aria-pressed={active}
               onclick={() => toggleAsset(option.key)}
@@ -177,10 +226,12 @@
             >
           {/each}
         </div>
-        <TabsList class="h-8 border border-border p-0.5 text-xs">
+        <TabsList
+          class="h-9 gap-1 rounded-lg border-0 bg-ink/5 p-0.5 text-caption"
+        >
           {#each [{ key: "sum", label: "總和" }, { key: "breakdown", label: "分類" }] as option (option.key)}
             <TabsTrigger
-              class="h-7 px-2 py-0.5 text-xs"
+              class={`h-8 cursor-pointer rounded-md px-2 py-0.5 text-sm font-semibold shadow-none ${displayMode === option.key ? "bg-steel text-white" : "text-subtle hover:bg-ink/5 hover:text-ink"}`}
               active={displayMode === option.key}
               onclick={() => (displayMode = option.key as NetWorthDisplayMode)}
               >{option.label}</TabsTrigger
@@ -188,47 +239,36 @@
           {/each}
         </TabsList>
       </div>
-      <div class="flex items-center gap-2">
-        {#if chartData.length > 0}
-          <span
-            class={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold ${changeValue >= 0 ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-500"}`}
-          >
-            {#if changeValue >= 0}<ArrowUpRight
-                class="size-3.5"
-              />{:else}<ArrowDownLeft class="size-3.5" />{/if}
-            {changePercent >= 0 ? "+" : ""}{changePercent.toFixed(1)}%
-          </span>
-        {/if}
-        <TabsList
-          class="grid h-8 grid-cols-5 border border-border p-0.5 text-xs"
-        >
-          {#each timeframes as option (option)}
-            <TabsTrigger
-              class="h-7 px-2 py-0.5 text-xs"
-              active={timeframe === option}
-              onclick={() => (timeframe = option)}
-              >{option === "ALL" ? "全部" : option}</TabsTrigger
-            >
-          {/each}
-        </TabsList>
-      </div>
     </div>
-  </CardHeader>
-  <CardContent class="min-w-0 overflow-hidden px-3 pb-4 sm:px-5 sm:pb-5">
+  </div>
+  <div class="min-w-0 overflow-hidden">
     {#if loading}
-      <div class="flex h-64 items-center justify-center text-sm text-ink/45">
+      <div class="flex h-64 items-center justify-center text-sm text-subtle">
         載入趨勢中…
       </div>
     {:else if chartData.length === 0}
       <div
-        class="flex h-64 items-center justify-center rounded-lg bg-ink/2 text-sm text-ink/45"
+        class="flex h-64 items-center justify-center rounded-lg bg-ink/2 text-sm text-subtle"
       >
         尚無淨資產歷史資料。
       </div>
     {:else}
+      <div class="mb-4 flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <p class="mb-1 text-caption text-subtle">已選資產合計</p>
+          <p
+            class="text-2xl font-semibold tracking-tight tabular-nums sm:text-3xl"
+          >
+            {formatCurrency(latestValue)}
+          </p>
+        </div>
+        <span class="pb-1 text-caption text-subtle">
+          {formatDate(chartData.at(-1)?.date)}
+        </span>
+      </div>
       <ChartContainer
         config={chartConfig}
-        class="h-52 min-h-52 w-full min-w-0 sm:h-56 sm:min-h-56"
+        class="h-60 min-h-60 w-full min-w-0 sm:h-80 sm:min-h-80"
       >
         <LineChart
           data={chartData}
@@ -243,114 +283,215 @@
           props={{
             xAxis: {
               format: formatAxisDate,
-              tickSpacing: 72,
+              tickSpacing: 110,
               tickMarks: false,
             },
             yAxis: {
               format: (value: unknown) => formatCompactTwd(Number(value)),
-              tickSpacing: 52,
+              ticks: 4,
               tickMarks: false,
-              grid: true,
+              grid: { opacity: 0.35 },
             },
             spline: { strokeWidth: 2.5 },
             highlight: { points: true, lines: true },
           }}
-        />
-      </ChartContainer>
-      <div
-        class="mt-2 flex min-w-0 flex-wrap items-center gap-3 border-t border-ink/8 pt-3"
-      >
-        {#if displayMode === "breakdown"}
-          <div class="flex flex-wrap gap-x-4 gap-y-2 text-xs text-ink/55">
-            <span class="inline-flex items-center gap-1.5"
-              ><span class="w-4 border-t-2 border-dashed border-ink"
-              ></span>總和</span
-            >
-            {#each NET_WORTH_ASSET_SERIES.filter( ({ key }) => includedAssets.includes(key) ) as item (item.key)}
-              <span class="inline-flex items-center gap-1.5"
-                ><span
-                  class="size-2 rounded-full"
-                  style={`background:${item.color}`}
-                ></span>{item.label}</span
-              >
-            {/each}
-          </div>
-        {:else}
-          <span class="text-xs text-ink/45">已選資產的每日合計</span>
-        {/if}
-      </div>
-      <div
-        class="mt-3 grid min-w-0 gap-3 border-t border-ink/8 pt-3 md:grid-cols-[auto_minmax(18rem,28rem)] md:items-start md:justify-between"
-      >
-        <div class="flex min-w-0 flex-wrap items-center gap-2">
-          <span class="shrink-0 text-xs font-semibold text-ink/50">比較</span>
-          <TabsList
-            class="grid h-8 grid-cols-3 border border-border p-0.5 text-xs"
-          >
-            {#each NET_WORTH_COMPARISON_PERIODS as option (option.key)}
-              <TabsTrigger
-                class="h-7 px-2 py-0.5 text-xs"
-                active={comparisonPeriod === option.key}
-                onclick={() => (comparisonPeriod = option.key)}
-                >{option.label}</TabsTrigger
-              >
-            {/each}
-          </TabsList>
-        </div>
-        {#if comparison && comparisonOption}
-          {@const comparisonSign = comparison.changeValue > 0 ? "+" : ""}
-          <div class="grid min-w-0 gap-2 rounded-lg bg-paper px-3 py-3 text-sm">
-            <div
-              class="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-baseline gap-3"
-            >
-              <span class="text-ink/45">目前</span>
-              <span
-                class="whitespace-nowrap text-right font-semibold text-ink/70 tabular-nums sm:text-base"
-                >{formatCurrency(comparison.currentValue)}</span
-              >
-            </div>
-            <div
-              class="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3"
-            >
-              <span class="min-w-0">
-                <span class="block font-medium text-ink/50"
-                  >{comparisonOption.label}</span
+        >
+          {#snippet marks({ context })}
+            {#if displayMode === "sum"}
+              <defs>
+                <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+                  <stop
+                    offset="0%"
+                    stop-color="var(--color-selectedTotal)"
+                    stop-opacity="0.18"
+                  />
+                  <stop
+                    offset="100%"
+                    stop-color="var(--color-selectedTotal)"
+                    stop-opacity="0.01"
+                  />
+                </linearGradient>
+              </defs>
+              <Area
+                seriesKey="selectedTotal"
+                fill={`url(#${gradientId})`}
+                line={{
+                  strokeWidth: 2.5,
+                  "stroke-linecap": "round",
+                  "stroke-linejoin": "round",
+                }}
+              />
+              {@const latest = chartData.at(-1)!}
+              <circle
+                cx={context.xScale(xValue(latest))}
+                cy={context.yScale(latest.selectedTotal)}
+                r="4"
+                fill="var(--color-selectedTotal)"
+                stroke="var(--color-paper)"
+                stroke-width="2"
+                pointer-events="none"
+              />
+            {:else}
+              {#each selectedSeries as series (series.key)}
+                {@const latest = chartData.at(-1)!}
+                {@const value = latest[series.key]}
+                <g
+                  opacity={activeFocus && activeFocus !== series.key ? 0.2 : 1}
                 >
-                <span class="mt-0.5 block text-xs text-ink/40">
-                  {formatDate(comparison.previousDate)}
+                  <Spline
+                    seriesKey={series.key}
+                    strokeWidth={activeFocus === series.key ? 3 : 2.5}
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                  {#if value !== undefined}
+                    <circle
+                      cx={context.xScale(xValue(latest))}
+                      cy={context.yScale(value)}
+                      r="4"
+                      fill={`var(--color-${series.key})`}
+                      stroke="var(--color-paper)"
+                      stroke-width="2"
+                      pointer-events="none"
+                    />
+                  {/if}
+                </g>
+              {/each}
+            {/if}
+          {/snippet}
+        </LineChart>
+      </ChartContainer>
+      <div class="mt-2 flex min-w-0 flex-wrap items-center gap-3 pt-3">
+        {#if displayMode === "breakdown"}
+          <div
+            class="grid w-full grid-cols-2 gap-2 sm:flex sm:flex-wrap"
+            aria-label="分類資產圖例"
+          >
+            {#each selectedSeries as item (item.key)}
+              {@const value = chartData.at(-1)?.[item.key]}
+              <button
+                type="button"
+                aria-pressed={activeFocus === item.key}
+                onclick={() =>
+                  (focusedAsset = activeFocus === item.key ? null : item.key)}
+                class={`min-w-0 cursor-pointer rounded-lg border px-3 py-2 text-left transition-colors ${activeFocus === item.key ? "border-steel/30 bg-steel/5" : "border-transparent hover:bg-ink/5"}`}
+              >
+                <span
+                  class="flex items-center gap-1.5 text-caption text-subtle"
+                >
+                  <span
+                    class="size-2 shrink-0 rounded-full"
+                    style={`background:${item.color}`}
+                  ></span>
+                  {item.label}
                 </span>
-              </span>
-              <span
-                class="whitespace-nowrap text-right font-semibold text-ink/70 tabular-nums sm:text-base"
-                >{formatCurrency(comparison.previousValue)}</span
-              >
-            </div>
-            <div
-              class="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-baseline gap-3 border-t border-ink/8 pt-1.5"
-            >
-              <span class="font-semibold text-ink/50">變化</span>
-              <span
-                class={`whitespace-nowrap text-right font-semibold tabular-nums sm:text-base ${comparison.changeValue > 0 ? "text-moss" : comparison.changeValue < 0 ? "text-coral" : "text-ink/55"}`}
-              >
-                {comparison.changeValue < 0
-                  ? ""
-                  : comparisonSign}{formatCurrency(comparison.changeValue)}
-                {#if comparison.changePercent !== null}
-                  （{comparison.changePercent > 0
-                    ? "+"
-                    : comparison.changePercent < 0
-                      ? "−"
-                      : ""}{Math.abs(comparison.changePercent).toFixed(1)}%）
-                {/if}
-              </span>
-            </div>
+                <span
+                  class="mt-1 block whitespace-nowrap text-sm font-semibold tabular-nums text-ink"
+                >
+                  {value === undefined ? "尚無紀錄" : formatCurrency(value)}
+                </span>
+              </button>
+            {/each}
           </div>
         {:else}
-          <p class="text-xs text-ink/40">
-            尚無{comparisonOption?.label ?? "目標"}的有效快照
-          </p>
+          <span class="text-caption text-subtle">已選資產的每日合計</span>
         {/if}
       </div>
+      <details class="group mt-4 border-t border-ink/8 pt-3">
+        <summary
+          class="flex min-h-10 cursor-pointer list-none flex-wrap items-center justify-between gap-2 text-caption [&::-webkit-details-marker]:hidden"
+        >
+          <span class="text-subtle">
+            {comparisonOption?.label ?? "較昨日"}
+            <span class="ml-2 font-medium text-ink">
+              {#if !comparison}尚無有效快照
+              {:else if comparison.changeValue === 0}持平
+              {:else}{comparison.changeValue > 0 ? "+" : ""}{formatCurrency(
+                  comparison.changeValue,
+                )}{/if}
+            </span>
+          </span>
+          <span class="flex items-center gap-1.5 text-subtle"
+            >比較明細 <ChevronDown
+              class="size-3.5 transition-transform group-open:rotate-180"
+            /></span
+          >
+        </summary>
+        <div
+          class="mt-3 grid min-w-0 gap-3 md:grid-cols-[auto_minmax(18rem,28rem)] md:items-start md:justify-between"
+        >
+          <div class="flex min-w-0 flex-wrap items-center gap-2">
+            <span class="shrink-0 text-caption font-semibold text-subtle"
+              >比較</span
+            >
+            <TabsList
+              class="grid h-9 grid-cols-3 gap-1 rounded-lg border-0 bg-ink/5 p-0.5 text-caption"
+            >
+              {#each NET_WORTH_COMPARISON_PERIODS as option (option.key)}
+                <TabsTrigger
+                  class={`h-8 cursor-pointer rounded-md px-2 py-0.5 text-sm font-semibold shadow-none ${comparisonPeriod === option.key ? "bg-steel text-white" : "text-subtle hover:bg-ink/5 hover:text-ink"}`}
+                  active={comparisonPeriod === option.key}
+                  onclick={() => (comparisonPeriod = option.key)}
+                  >{option.label}</TabsTrigger
+                >
+              {/each}
+            </TabsList>
+          </div>
+          {#if comparison && comparisonOption}
+            {@const comparisonSign = comparison.changeValue > 0 ? "+" : ""}
+            <div class="grid min-w-0 gap-2 py-2 text-sm">
+              <div
+                class="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-baseline gap-3"
+              >
+                <span class="text-subtle">目前</span>
+                <span
+                  class="whitespace-nowrap text-right font-semibold tabular-nums sm:text-base"
+                  >{formatCurrency(comparison.currentValue)}</span
+                >
+              </div>
+              <div
+                class="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3"
+              >
+                <span class="min-w-0">
+                  <span class="block font-medium text-subtle"
+                    >{comparisonOption.label}</span
+                  >
+                  <span class="mt-0.5 block text-caption text-subtle">
+                    {formatDate(comparison.previousDate)}
+                  </span>
+                </span>
+                <span
+                  class="whitespace-nowrap text-right font-semibold tabular-nums sm:text-base"
+                  >{formatCurrency(comparison.previousValue)}</span
+                >
+              </div>
+              <div
+                class="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-baseline gap-3 border-t border-ink/8 pt-1.5"
+              >
+                <span class="font-semibold text-subtle">變化</span>
+                <span
+                  class={`whitespace-nowrap text-right font-semibold tabular-nums sm:text-base ${comparison.changeValue > 0 ? "text-moss" : comparison.changeValue < 0 ? "text-coral" : "text-subtle"}`}
+                >
+                  {comparison.changeValue < 0
+                    ? ""
+                    : comparisonSign}{formatCurrency(comparison.changeValue)}
+                  {#if comparison.changePercent !== null}
+                    （{comparison.changePercent > 0
+                      ? "+"
+                      : comparison.changePercent < 0
+                        ? "−"
+                        : ""}{Math.abs(comparison.changePercent).toFixed(1)}%）
+                  {/if}
+                </span>
+              </div>
+            </div>
+          {:else}
+            <p class="text-caption text-subtle">
+              尚無{comparisonOption?.label ?? "目標"}的有效快照
+            </p>
+          {/if}
+        </div>
+      </details>
     {/if}
-  </CardContent>
-</Card>
+  </div>
+</section>

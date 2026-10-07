@@ -1,6 +1,15 @@
 import type { ActivityItem } from "./types";
 
-export type ActivityFlow = "income" | "expense";
+import {
+  activityDisplayAmount,
+  activityCashFlow,
+  type ActivityFlow,
+} from "@taiwan-fin-hub/shared";
+export {
+  activityDisplayAmount,
+  activityCashFlow,
+  type ActivityFlow,
+} from "@taiwan-fin-hub/shared";
 
 export interface ActivityCategorySlice {
   category: string;
@@ -20,24 +29,18 @@ export const ACTIVITY_CATEGORY_COLORS = [
   "#68747b",
 ];
 
-export function activityDisplayAmount(item: ActivityItem) {
-  if (item.amount == null) return undefined;
-  return item.source === "invoice" ? -Math.abs(item.amount) : item.amount;
-}
-
-export function activityCashFlow(item: ActivityItem): ActivityFlow | null {
-  if (
-    item.amount == null ||
-    (item.source !== "bank" &&
-      item.source !== "card" &&
-      item.source !== "invoice")
-  )
-    return null;
+export function activityAmountTwd(
+  item: ActivityItem,
+  rates: Record<string, number>,
+): number | undefined {
   const amount = activityDisplayAmount(item);
-  if (amount == null) return null;
-  if (amount > 0) return "income";
-  if (amount < 0) return "expense";
-  return null;
+  if (amount == null) return undefined;
+  if (amount === 0) return 0;
+  if (item.currency === "TWD") return amount;
+  const rate = rates[item.currency];
+  return rate != null && Number.isFinite(rate) && rate > 0
+    ? amount * rate
+    : undefined;
 }
 
 export function activityCashAmountTwd(
@@ -52,8 +55,7 @@ export function activityCashAmountTwd(
       item.source !== "invoice")
   )
     return 0;
-  const rate = item.currency === "TWD" ? 1 : (rates[item.currency] ?? 0);
-  return (activityDisplayAmount(item) ?? 0) * rate;
+  return activityAmountTwd(item, rates) ?? 0;
 }
 
 export function buildActivityCategorySlices(

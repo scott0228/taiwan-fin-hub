@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from "hono";
+import { sanitizeDatabaseError } from "../db";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { AppBindings, Env } from "./env";
@@ -32,7 +33,7 @@ export function apiErrorResponse(error: Error) {
     );
   }
 
-  console.error("[api] unhandled error:", error);
+  console.error("[api] unhandled error:", sanitizeDatabaseError(error));
   return jsonError("INTERNAL_ERROR", "An unexpected error occurred.", 500);
 }
 
@@ -67,7 +68,7 @@ export const demoReadOnlyMiddleware: MiddlewareHandler<AppBindings> = async (
 
 const paginationLimitSchema = z.coerce.number().int().min(1).max(100);
 
-export function parseKeysetPagination<T extends z.ZodTypeAny>(
+export function parseKeysetPagination<T extends z.ZodType>(
   query: Record<string, string | undefined>,
   cursorSchema: T,
   defaultLimit = 50,

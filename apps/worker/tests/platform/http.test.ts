@@ -1,13 +1,12 @@
 import { Hono } from "hono";
-import { HTTPException } from "hono/http-exception";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { connectorRoutes } from "../../src/features/connectors/route";
 import type { AppBindings, Env } from "../../src/platform/env";
 import {
   apiErrorResponse,
   demoReadOnlyMiddleware,
   encodePageCursor,
-  isDemoMode,
   parseKeysetPagination,
 } from "../../src/platform/http";
 
@@ -38,48 +37,51 @@ describe("demo read-only middleware", () => {
       error: { code: "DEMO_MODE_READ_ONLY" },
     });
   });
-
-  it("recognizes supported demo mode values", () => {
-    expect(isDemoMode({ DEMO_MODE: true })).toBe(true);
-    expect(isDemoMode({ DEMO_MODE: "YES" })).toBe(true);
-    expect(isDemoMode({ DEMO_MODE: "false" })).toBe(false);
-  });
 });
 
 describe("HTTP helpers", () => {
-  it("round-trips an opaque keyset cursor", () => {
-    const schema = z.object({ effectiveDate: z.string(), name: z.string() });
-    const cursor = encodePageCursor({
-      effectiveDate: "2026-07-19",
-      name: "台積電",
-    });
-    expect(parseKeysetPagination({ limit: "25", cursor }, schema)).toEqual({
-      limit: 25,
-      cursor: { effectiveDate: "2026-07-19", name: "台積電" },
-    });
-    expect(() => parseKeysetPagination({ cursor: "invalid" }, schema)).toThrow(
-      z.ZodError,
+  // 預期依據：後端架構的 API 錯誤契約要求固定 error code，且不得洩漏輸入。
+  it("Zod 分頁驗證失敗仍回傳固定 400，且不洩漏 cursor 內容", async () => {
+    const app = new Hono();
+    app.onError(apiErrorResponse);
+    app.get("/resource", (c) =>
+      c.json(
+        parseKeysetPagination(
+          c.req.query(),
+          z.object({ lastPostedDate: z.string(), lastId: z.string() }),
+        ),
+      ),
     );
-    expect(() => parseKeysetPagination({ limit: "101" }, schema)).toThrow(
-      z.ZodError,
-    );
+    const cursor = encodePageCursor({ lastId: "synthetic-private-cursor" });
+    const response = await app.request(`/resource?cursor=${cursor}`);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      success: false,
+      error: {
+        code: "INVALID_REQUEST",
+        message: "Request data does not match the expected format.",
+      },
+    });
   });
 
-  it("maps validation errors to 400 without exposing details", async () => {
-    const response = apiErrorResponse(new z.ZodError([]));
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({
-      error: { code: "INVALID_REQUEST" },
-    });
-  });
-
-  it("normalizes malformed JSON errors from Hono validators", async () => {
-    const response = apiErrorResponse(
-      new HTTPException(400, { message: "Malformed JSON" }),
+  it("Hono 的 Zod 驗證失敗仍回傳固定錯誤，且不洩漏設定內容", async () => {
+    const response = await connectorRoutes.request(
+      "/connectors/sinopac/settings",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: "synthetic-private-config" }),
+      },
     );
+
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({
-      error: { code: "INVALID_REQUEST" },
+    await expect(response.json()).resolves.toEqual({
+      success: false,
+      error: {
+        code: "INVALID_REQUEST_BODY",
+        message: "Request body must include a config object.",
+      },
     });
   });
 

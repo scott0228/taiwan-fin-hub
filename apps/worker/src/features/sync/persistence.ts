@@ -1,4 +1,14 @@
-import type { SyncNewRecordCounts } from "@taiwan-fin-hub/core";
+import {
+  captureStagedActivityBefore,
+  captureStagedActivityAfter,
+} from "./reports/activity-capture";
+import {
+  createDrizzle,
+  sanitizeDatabaseError,
+  syncWriteStaging,
+} from "../../db";
+import { eq, lt } from "drizzle-orm";
+import type { ConnectorId, SyncNewRecordCounts } from "@taiwan-fin-hub/shared";
 
 export type SyncEntityType =
   | "invoice"
@@ -15,6 +25,11 @@ export type SyncWriteRecord = {
   entityType: SyncEntityType;
   recordKey: string;
   payload: Record<string, unknown>;
+};
+
+type SettingsGuard = {
+  connectorId: ConnectorId;
+  encryptedConfig: string;
 };
 
 type EntityConfig = {
@@ -101,6 +116,9 @@ const ENTITY_CONFIG: Record<SyncEntityType, EntityConfig> = {
       "account_type",
       "currency",
       "credit_limit",
+      "opened_date",
+      "maturity_date",
+      "inactive_at",
       "bank_code",
       "account_last4",
       "raw_payload",
@@ -114,6 +132,9 @@ const ENTITY_CONFIG: Record<SyncEntityType, EntityConfig> = {
       "account_type",
       "currency",
       "credit_limit",
+      "opened_date",
+      "maturity_date",
+      "inactive_at",
       "bank_code",
       "account_last4",
       "raw_payload",
@@ -167,6 +188,7 @@ const ENTITY_CONFIG: Record<SyncEntityType, EntityConfig> = {
       "description",
       "counterparty",
       "status",
+      "transfer_peer_id",
       "raw_payload",
       "created_at",
       "updated_at",
@@ -180,6 +202,7 @@ const ENTITY_CONFIG: Record<SyncEntityType, EntityConfig> = {
       "description",
       "counterparty",
       "status",
+      "transfer_peer_id",
       "raw_payload",
       "updated_at",
     ],
@@ -335,6 +358,7 @@ export async function stageSyncWriteRecords(
 ) {
   if (records.length === 0) return;
   const createdAt = new Date().toISOString();
+  // 保留 JSON set-based upsert：每 chunk 只綁定三個參數，避免逐筆 values 擴大參數量。
   for (let offset = 0; offset < records.length; offset += STAGING_CHUNK_SIZE) {
     const chunk = records.slice(offset, offset + STAGING_CHUNK_SIZE);
     await db
@@ -362,6 +386,7 @@ export async function promoteStagedSyncWrite(
   input: {
     runId: string;
     entityTypes: readonly SyncEntityType[];
+    settingsGuard?: SettingsGuard;
     beforePromoteStatements?: D1PreparedStatement[];
     afterPromoteStatements?: D1PreparedStatement[];
     finalizeStatements?: D1PreparedStatement[];
@@ -381,12 +406,45 @@ export async function promoteStagedSyncWrite(
         entityType as keyof typeof NEW_RECORD_ENTITIES,
       ),
     }));
-  const countResultOffset = input.beforePromoteStatements?.length ?? 0;
-  const batchResults = await db.batch([
+  const beforePromoteStatements = [
+    ...(input.settingsGuard
+      ? [
+          db
+            .prepare(
+              `DELETE FROM sync_write_staging
+               WHERE run_id = ? AND NOT EXISTS (
+                 SELECT 1 FROM connector_settings
+                 WHERE connector_id = ? AND encrypted_config = ?
+               )`,
+            )
+            .bind(
+              input.runId,
+              input.settingsGuard.connectorId,
+              input.settingsGuard.encryptedConfig,
+            ),
+        ]
+      : []),
     ...(input.beforePromoteStatements ?? []),
+  ];
+  const countResultOffset = beforePromoteStatements.length;
+  // 保留整組原生 D1 batch：跨檔案 factories、計數 offset、promotion、
+  // lifecycle reconciliation、finalize/cursor 與 cleanup 必須維持順序及同一原子邊界。
+  const batchResults = await db.batch([
+    ...beforePromoteStatements,
     ...newRecordCountStatements.map(({ statement }) => statement),
+    ...captureStagedActivityBefore(
+      db,
+      input.runId,
+      Object.keys(NEW_RECORD_ENTITIES)
+        .filter((entityType) => entityTypes.has(entityType as SyncEntityType))
+        .map((entityType) => ({
+          entityType,
+          ...ENTITY_CONFIG[entityType as SyncEntityType],
+        })),
+    ),
     ...promotionStatements,
     ...(input.afterPromoteStatements ?? []),
+    ...captureStagedActivityAfter(db, input.runId),
     ...(input.finalizeStatements ?? []),
     db
       .prepare("DELETE FROM sync_write_staging WHERE run_id = ?")
@@ -405,30 +463,40 @@ export async function persistStagedSyncWrite(
   db: D1Database,
   input: {
     records: SyncWriteRecord[];
+    settingsGuard?: SettingsGuard;
     beforePromoteStatements?: D1PreparedStatement[];
     afterPromoteStatements?: D1PreparedStatement[];
     finalizeStatements?: D1PreparedStatement[];
   },
 ) {
   const runId = crypto.randomUUID();
-  await db
-    .prepare("DELETE FROM sync_write_staging WHERE created_at < ?")
-    .bind(new Date(Date.now() - STAGING_RETENTION_MS).toISOString())
-    .run();
+  await createDrizzle(db)
+    .delete(syncWriteStaging)
+    .where(
+      lt(
+        syncWriteStaging.createdAt,
+        new Date(Date.now() - STAGING_RETENTION_MS).toISOString(),
+      ),
+    )
+    .run()
+    .catch((error) => {
+      throw sanitizeDatabaseError(error);
+    });
 
   try {
     await stageSyncWriteRecords(db, runId, input.records);
     return await promoteStagedSyncWrite(db, {
       runId,
       entityTypes: input.records.map((record) => record.entityType),
+      settingsGuard: input.settingsGuard,
       beforePromoteStatements: input.beforePromoteStatements,
       afterPromoteStatements: input.afterPromoteStatements,
       finalizeStatements: input.finalizeStatements,
     });
   } catch (error) {
-    await db
-      .prepare("DELETE FROM sync_write_staging WHERE run_id = ?")
-      .bind(runId)
+    await createDrizzle(db)
+      .delete(syncWriteStaging)
+      .where(eq(syncWriteStaging.runId, runId))
       .run()
       .catch(() => undefined);
     throw error;
@@ -474,6 +542,11 @@ function promotionStatement(
     .join(", ");
   const updates = config.updateColumns
     .map((column) => {
+      if (entityType === "invoice" && column === "invoice_date")
+        return `invoice_date = CASE
+          WHEN length(invoices.invoice_date) > 10 AND length(excluded.invoice_date) = 10
+            AND date(invoices.invoice_date, '+8 hours') = excluded.invoice_date
+          THEN invoices.invoice_date ELSE excluded.invoice_date END`;
       if (entityType === "credit_card_bill") {
         if (column === "paid_amount")
           return "paid_amount = COALESCE(excluded.paid_amount, credit_card_bills.paid_amount)";
@@ -485,12 +558,23 @@ function promotionStatement(
       }
       if (entityType !== "bank_transaction")
         return `${column} = excluded.${column}`;
+      if (column === "transfer_peer_id")
+        return "transfer_peer_id = COALESCE(excluded.transfer_peer_id, bank_transactions.transfer_peer_id)";
       if (column === "status")
         return "status = CASE WHEN bank_transactions.status = 'posted' OR excluded.status = 'posted' THEN 'posted' ELSE 'pending' END";
       if (column === "authorized_at")
         return `authorized_at = CASE
+          WHEN length(bank_transactions.authorized_at) > 10
+            AND (excluded.authorized_at IS NULL OR (
+              length(excluded.authorized_at) = 10
+              AND date(bank_transactions.authorized_at, '+8 hours') = excluded.authorized_at
+            ))
+            THEN bank_transactions.authorized_at
           WHEN bank_transactions.status = 'pending' AND excluded.status = 'posted'
-            THEN COALESCE(bank_transactions.authorized_at, excluded.authorized_at)
+            THEN CASE WHEN length(excluded.authorized_at) > 10
+              AND length(bank_transactions.authorized_at) <= 10
+              THEN excluded.authorized_at
+              ELSE COALESCE(bank_transactions.authorized_at, excluded.authorized_at) END
           WHEN bank_transactions.status = 'posted' AND excluded.status = 'pending'
             THEN bank_transactions.authorized_at
           ELSE excluded.authorized_at

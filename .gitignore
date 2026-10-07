@@ -24,9 +24,12 @@ apps/worker/wrangler.local.toml
 *.tsbuildinfo
 .DS_Store
 research/
+design/
 
 docs/*
 !docs/
 !docs/*.md
 
 .vscode/
+
+**/.svelte-check/

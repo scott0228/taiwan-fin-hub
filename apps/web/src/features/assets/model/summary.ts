@@ -13,6 +13,9 @@ const CONNECTOR_BANK_CODES: Record<string, string> = {
   esun: "808",
   taishin: "812",
   ctbc: "822",
+  kgibank: "809",
+  megabank: "017",
+  rakuten: "826",
 };
 
 export interface InstitutionAssetGroup {
@@ -22,6 +25,7 @@ export interface InstitutionAssetGroup {
   cards: BankAccountRow[];
   assetTotalTwd: number;
   debtTotalTwd: number;
+  hasUnknownCardBalance: boolean;
   foreignCurrencies: string[];
 }
 
@@ -32,6 +36,7 @@ export interface AssetSummary {
   investmentTotal: number;
   manualTotal: number;
   cardDebt: number;
+  hasUnknownCardBalance: boolean;
   grossAssets: number;
   netWorth: number;
   institutionGroups: InstitutionAssetGroup[];
@@ -102,8 +107,7 @@ export function calculateAssetSummary({
     0,
   );
   const cardDebt = cards.reduce(
-    (sum, account) =>
-      sum + Math.abs(toTwd(account.balance ?? 0, account.currency)),
+    (sum, account) => sum - toTwd(account.balance ?? 0, account.currency),
     0,
   );
   const grossAssets = bankTotal + investmentTotal + manualTotal;
@@ -144,9 +148,9 @@ export function calculateAssetSummary({
           (sum, account) => sum + toTwd(account.balance ?? 0, account.currency),
           0,
         ),
+        hasUnknownCardBalance: cards.some((card) => card.balance == null),
         debtTotalTwd: cards.reduce(
-          (sum, account) =>
-            sum + Math.abs(toTwd(account.balance ?? 0, account.currency)),
+          (sum, account) => sum - toTwd(account.balance ?? 0, account.currency),
           0,
         ),
         foreignCurrencies: [
@@ -172,6 +176,7 @@ export function calculateAssetSummary({
     investmentTotal,
     manualTotal,
     cardDebt,
+    hasUnknownCardBalance: cards.some((card) => card.balance == null),
     grossAssets,
     netWorth: grossAssets - cardDebt,
     institutionGroups,

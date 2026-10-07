@@ -1,5 +1,6 @@
 export type TransferMatchTransaction = {
   id: string;
+  transferPeerId?: string | null;
   accountId: string;
   amount: number;
   currency: string;
@@ -35,9 +36,53 @@ const CREDIT_FEE_REDUCTION_PATTERN = /減免|折抵|回饋|退回|退費/u;
 export function findAutomaticTransferPairs(
   transactions: TransferMatchTransaction[],
 ): Array<readonly [string, string]> {
+  const byId = new Map(
+    transactions.map((transaction) => [transaction.id, transaction]),
+  );
+  const explicitPairs: Array<readonly [string, string]> = [];
+  const reserved = new Set<string>();
+  for (const transaction of transactions) {
+    if (
+      transaction.accountType !== "time_deposit" ||
+      !transaction.transferPeerId
+    )
+      continue;
+    const peer = byId.get(transaction.transferPeerId);
+    if (
+      !peer ||
+      peer.accountType === "time_deposit" ||
+      peer.accountType === "credit" ||
+      transaction.accountId === peer.accountId ||
+      transaction.status !== "posted" ||
+      peer.status !== "posted" ||
+      !Number.isFinite(transaction.amount) ||
+      transaction.amount === 0 ||
+      transaction.amount !== -peer.amount ||
+      transaction.currency !== peer.currency ||
+      !getAutomaticTransferDay(transaction) ||
+      getAutomaticTransferDay(transaction) !== getAutomaticTransferDay(peer) ||
+      reserved.has(peer.id) ||
+      reserved.has(transaction.id)
+    )
+      continue;
+    // Never choose among multiple deposit events claiming the same demand leg.
+    if (
+      transactions.filter((other) => other.transferPeerId === peer.id)
+        .length !== 1
+    )
+      continue;
+    explicitPairs.push([transaction.id, peer.id]);
+    reserved.add(transaction.id);
+    reserved.add(peer.id);
+  }
   const groups = new Map<string, TransferCandidateGroup>();
 
   for (const transaction of transactions) {
+    if (
+      reserved.has(transaction.id) ||
+      transaction.accountType === "time_deposit"
+    )
+      continue;
     if (transaction.status !== "posted") continue;
     if (transaction.accountType === "credit") continue;
     if (!Number.isFinite(transaction.amount) || transaction.amount === 0)
@@ -57,15 +102,24 @@ export function findAutomaticTransferPairs(
     groups.set(key, group);
   }
 
-  return [...groups.values()].flatMap(({ positive, negative }) =>
-    pairCrossAccountCandidates(positive, negative),
-  );
+  return [
+    ...explicitPairs,
+    ...[...groups.values()].flatMap(({ positive, negative }) =>
+      pairCrossAccountCandidates(positive, negative),
+    ),
+  ];
 }
 
 export function getAutomaticTransferDay(
   transaction: Pick<TransferMatchTransaction, "authorizedAt" | "postedDate">,
 ) {
-  return storedFinancialDay(transaction.authorizedAt ?? transaction.postedDate);
+  const { authorizedAt, postedDate } = transaction;
+  if (authorizedAt && /(?:Z|[+-]\d{2}:\d{2})$/.test(authorizedAt)) {
+    const parsed = Date.parse(authorizedAt);
+    if (Number.isFinite(parsed))
+      return new Date(parsed + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  }
+  return storedFinancialDay(authorizedAt ?? postedDate);
 }
 
 export function findAutomaticTransferTransactionIds(
@@ -134,10 +188,7 @@ function storedFinancialDay(value?: string | null) {
   if (!value) return undefined;
 
   const dateOnly = value.trim().match(/^\d{4}-\d{2}-\d{2}/)?.[0];
-  // Bank connectors store the financial date in the timestamp prefix, and
-  // Activity groups rows by that same prefix. Do not reinterpret it through
-  // the runtime timezone: TDCC timestamps can represent a Taiwan local time
-  // while carrying a UTC-looking suffix.
+  // Date-only authorizations and legacy posting dates retain their calendar day.
   if (dateOnly) return dateOnly;
 
   const parsed = new Date(value);

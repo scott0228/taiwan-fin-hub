@@ -37,39 +37,41 @@
 
 <div class={compact ? "grid gap-3" : "flex min-h-full flex-col"}>
   {#if !compact}
-    <header class="border-b border-border px-5 py-4">
-      <p class="text-xs font-semibold text-muted-foreground">投資</p>
+    <header class="border-b border-ink/10 px-5 py-4">
+      <p class="text-caption font-medium text-subtle">投資</p>
       <h2 class="mt-1 text-xl font-semibold tracking-tight">投資組合</h2>
-      <p class="mt-1 text-xs text-muted-foreground">持倉與交易紀錄集中查看</p>
+      <p class="mt-1 text-caption text-subtle">持倉與交易紀錄集中查看</p>
     </header>
-    <div class="grid grid-cols-2 gap-2 border-b border-border p-4">
-      <div class="rounded-lg border border-border bg-paper p-3">
-        <p class="text-xs text-muted-foreground">投資市值</p>
-        <p class="mt-1 text-lg font-bold tabular-nums text-steel">
+    <div class="grid grid-cols-2 gap-6 border-b border-ink/10 px-5 py-4">
+      <div>
+        <p class="text-caption text-subtle">投資市值</p>
+        <p class="mt-2 text-lg font-medium tabular-nums text-steel">
           {formatCurrency(total)}
         </p>
       </div>
-      <div class="rounded-lg border border-border bg-paper p-3">
-        <p class="text-xs text-muted-foreground">持倉</p>
-        <p class="mt-1 text-lg font-bold tabular-nums">{positions.length} 筆</p>
+      <div>
+        <p class="text-caption text-subtle">持倉</p>
+        <p class="mt-2 text-lg font-medium tabular-nums">
+          {positions.length} 筆
+        </p>
       </div>
     </div>
   {/if}
 
   <div
-    class="flex gap-1 border-b border-border px-4 pt-2"
+    class={`flex gap-1 border-b border-ink/8 pt-2 ${compact ? "" : "px-4"}`}
     role="tablist"
     aria-label="投資組合"
   >
     <button
-      class={`min-h-10 border-b-2 px-3 text-sm font-semibold ${tab === "holdings" ? "border-steel text-ink" : "border-transparent text-muted-foreground"}`}
+      class={`min-h-10 border-b-2 px-3 text-sm font-semibold ${tab === "holdings" ? "border-steel text-ink" : "border-transparent text-subtle"}`}
       type="button"
       role="tab"
       aria-selected={tab === "holdings"}
       onclick={() => (tab = "holdings")}>持倉</button
     >
     <button
-      class={`min-h-10 border-b-2 px-3 text-sm font-semibold ${tab === "transactions" ? "border-steel text-ink" : "border-transparent text-muted-foreground"}`}
+      class={`min-h-10 border-b-2 px-3 text-sm font-semibold ${tab === "transactions" ? "border-steel text-ink" : "border-transparent text-subtle"}`}
       type="button"
       role="tab"
       aria-selected={tab === "transactions"}
@@ -80,9 +82,7 @@
   <div class={compact ? "" : "min-h-0 flex-1 overflow-y-auto px-5 pb-4"}>
     {#if tab === "holdings"}
       {#if positions.length === 0}
-        <p class="py-8 text-center text-sm text-muted-foreground">
-          尚無投資持倉。
-        </p>
+        <p class="py-8 text-center text-sm text-subtle">尚無投資持倉。</p>
       {:else}
         <div class="divide-y divide-border">
           {#each positions as position (position.id)}
@@ -93,12 +93,12 @@
                 <p class="break-words text-sm font-semibold">
                   {position.symbol ? `${position.symbol} ` : ""}{position.name}
                 </p>
-                <p class="mt-1 text-xs text-muted-foreground">
+                <p class="mt-1 text-caption text-subtle">
                   {position.assetType.toUpperCase()} · {position.currency} ·
                   {formatNumber(position.quantity ?? 0)} 單位
                 </p>
               </div>
-              <p class="text-right text-sm font-bold tabular-nums text-steel">
+              <p class="text-right text-sm font-medium tabular-nums text-steel">
                 {formatCurrency(
                   (position.marketValue ?? 0) + (position.cashBalance ?? 0),
                   position.currency,
@@ -109,15 +109,11 @@
         </div>
       {/if}
     {:else if tradesPending}
-      <p class="py-8 text-center text-sm text-muted-foreground">
-        正在載入交易紀錄。
-      </p>
+      <p class="py-8 text-center text-sm text-subtle">正在載入交易紀錄。</p>
     {:else if tradesError}
       <p class="py-8 text-center text-sm text-coral">交易紀錄暫時無法載入。</p>
     {:else if trades.length === 0}
-      <p class="py-8 text-center text-sm text-muted-foreground">
-        尚無交易紀錄。
-      </p>
+      <p class="py-8 text-center text-sm text-subtle">尚無交易紀錄。</p>
     {:else}
       <div class="divide-y divide-border">
         {#each trades.slice(0, 100) as trade (trade.id)}
@@ -128,7 +124,7 @@
               <p class="break-words text-sm font-semibold">
                 {trade.name ?? trade.symbol ?? "投資交易"}
               </p>
-              <p class="mt-1 text-xs text-muted-foreground">
+              <p class="mt-1 text-caption text-subtle">
                 {trade.transactionName ?? trade.transactionCode ?? "交易"} ·
                 {formatDate(trade.tradeDate ?? trade.postedDate)}
               </p>
