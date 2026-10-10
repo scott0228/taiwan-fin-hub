@@ -48,6 +48,78 @@
 - 部分銀行自動登入可能中斷你正在使用的官方 App 或網銀工作階段。
 - 資料更新時間與完整性取決於外部服務，不應視為銀行、券商或財政部的即時正式對帳資料。
 
+## 集保信任裝置（進階）
+
+集保 e 存摺以「使用者 + 裝置識別」綁定信任裝置；未知裝置登入會要求 OTP。
+若你已在集保官方 App 完成裝置驗證，可將該裝置識別寫入連接器設定，之後同步即可
+重用這台信任裝置、免再輸入 OTP。此操作不繞過集保的安全機制，而是重用一台已由
+你本人驗證過的裝置。
+
+先在資料來源面板設定好集保帳密，再呼叫下列 API（需通過 Cloudflare Access）：
+
+```
+POST /api/connectors/tdcc/trusted-device
+Content-Type: application/json
+
+{ "deviceId": "<裝置識別>", "devType": "<裝置型別，例如 iOS:27.0.1>", "devModel": "<選填，例如 iPhone15,3>" }
+```
+
+成功會回傳 `{ "connectorId": "tdcc", "configured": true, "updatedAt": ... }`，
+並清除舊的工作階段與同步游標，下次同步以新裝置重新登入。
+
+因端點位於 Cloudflare Access 後方，以下任一方式皆可呼叫：
+
+### 方式一：瀏覽器 Console（最簡）
+
+在已登入、已通過 Access 的 app 分頁打開 DevTools（F12）Console，same-origin
+請求會自動帶上 Access cookie：
+
+```js
+await fetch("/api/connectors/tdcc/trusted-device", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  credentials: "include",
+  body: JSON.stringify({
+    deviceId: "<裝置識別>",
+    devType: "iOS:27.0.1",
+    // devModel: "iPhone15,3",
+  }),
+}).then((r) => r.json());
+```
+
+必須在 app 自己的網域分頁執行，cookie 才會帶上。
+
+### 方式二：`cloudflared` CLI
+
+本機安裝 `cloudflared`，互動登入一次取得 token：
+
+```bash
+TOKEN=$(cloudflared access token --app https://<你的網域>)
+curl -X POST https://<你的網域>/api/connectors/tdcc/trusted-device \
+  -H "cf-access-token: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"deviceId":"<裝置識別>","devType":"iOS:27.0.1"}'
+```
+
+### 方式三：Access Service Token（自動化）
+
+於 Cloudflare Zero Trust → Access → Service Auth 建立 service token，將其加入此
+app 的 Access policy，之後以 header 呼叫，不需互動登入：
+
+```bash
+curl -X POST https://<你的網域>/api/connectors/tdcc/trusted-device \
+  -H "CF-Access-Client-Id: <id>" \
+  -H "CF-Access-Client-Secret: <secret>" \
+  -H "Content-Type: application/json" \
+  -d '{"deviceId":"<裝置識別>","devType":"iOS:27.0.1"}'
+```
+
+注意事項：
+
+- 集保若限制同一裝置僅能有一個登入中的工作階段，背景同步可能使你手機上的官方
+  App 被登出；裝置信任本身不受影響，重新登入即可。
+- `devModel` 未提供時使用預設值，通常不影響登入；若登入被拒，再補上對應機型字串。
+
 ## 免費部署
 
 本專案使用的 Workers、D1、Queues、Workers AI 與 Browser Run 均提供免費額度。各項免費額度並非無限；超過服務限制時，相關功能可能暫停至額度重置。
