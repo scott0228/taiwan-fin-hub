@@ -188,6 +188,68 @@ export async function updateConnectorSettings(
   return { connectorId, configured: true, updatedAt: now };
 }
 
+export async function setTdccTrustedDevice(
+  env: Env,
+  connectorId: ConnectorId,
+  input: { deviceId: string; devType: string; devModel?: string },
+) {
+  // Device reuse is a TDCC-specific concept: sync trusts a device by
+  // (userId, deviceId), so injecting an already-verified device id skips OTP.
+  if (connectorId !== "tdcc") throw new InvalidConnectorConfigError();
+
+  const encryptionKey = configEncryptionKey(env);
+  const existing = await findConnectorSettings(env.DB, connectorId);
+  if (!existing) throw new ConnectorConfigMissingError();
+
+  const now = new Date().toISOString();
+  let encryptedConfig: Record<string, unknown>;
+  try {
+    const stored = await decryptJson<Record<string, unknown>>(
+      existing.encrypted_config,
+      encryptionKey,
+    );
+    const credentialsComplete = connectorCatalog[
+      connectorId
+    ].credentialFields.every(
+      (key) =>
+        typeof stored[key] === "string" && (stored[key] as string).length > 0,
+    );
+    if (!credentialsComplete) throw new ConnectorConfigMissingError();
+
+    const merged: Record<string, unknown> = {
+      ...stored,
+      deviceId: input.deviceId,
+      devType: input.devType,
+    };
+    if (input.devModel) merged.devModel = input.devModel;
+    // Drop any stale session/OTP: a stored token id is bound to the previous
+    // device id, so the next sync must re-login with the injected device.
+    delete merged.session;
+    delete merged.otp;
+    delete merged.otpChannel;
+
+    encryptedConfig = parseConnectorConfig(connectorId, merged) as Record<
+      string,
+      unknown
+    >;
+  } catch (error) {
+    if (error instanceof ConnectorConfigMissingError) throw error;
+    throw new InvalidConnectorConfigError();
+  }
+
+  await saveConnectorSettings(env.DB, {
+    id: existing.id,
+    connectorId,
+    encryptedConfig: await encryptJson(encryptedConfig, encryptionKey),
+    publicConfig: existing.public_config ?? null,
+    now,
+  });
+  // The stored cursor also carries the previous device id / session; clear it
+  // so the injected device id (config takes precedence) is used cleanly.
+  await clearConnectorCursor(env.DB, connectorId, now);
+  return { connectorId, configured: true, updatedAt: now };
+}
+
 function filterPublicConfig(
   connectorId: ConnectorId,
   config: Record<string, unknown>,

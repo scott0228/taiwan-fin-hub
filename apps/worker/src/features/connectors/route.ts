@@ -8,11 +8,18 @@ import {
   ConnectorConfigMissingError,
   getConnectorSettingsView,
   InvalidConnectorConfigError,
+  setTdccTrustedDevice,
   updateConnectorSettings,
 } from "./service";
 
 const settingsBodySchema = z.object({
   config: z.record(z.string(), z.unknown()),
+});
+
+const trustedDeviceBodySchema = z.object({
+  deviceId: z.string().min(1),
+  devType: z.string().min(1),
+  devModel: z.string().min(1).optional(),
 });
 
 export const connectorRoutes = honoFactory.createApp();
@@ -64,6 +71,54 @@ function registerConnectorSettingsRoutes(api: Hono<AppBindings>) {
               error: {
                 code: "INVALID_CONNECTOR_CONFIG",
                 message: "Connector config does not match the expected shape.",
+              },
+            },
+            400,
+          );
+        }
+        throw error;
+      }
+    },
+  );
+
+  api.post(
+    "/connectors/:connectorId/trusted-device",
+    zValidator(
+      "json",
+      trustedDeviceBodySchema,
+      validationHook(
+        "INVALID_REQUEST_BODY",
+        "Request body must include deviceId and devType.",
+      ),
+    ),
+    async (c) => {
+      const body = c.req.valid("json");
+      try {
+        return c.json(
+          await setTdccTrustedDevice(c.env, c.get("connectorId"), body),
+        );
+      } catch (error) {
+        if (error instanceof ConnectorConfigMissingError) {
+          return c.json(
+            {
+              success: false,
+              error: {
+                code: "CONNECTOR_CONFIG_MISSING",
+                message:
+                  "Set TDCC credentials before registering a trusted device.",
+              },
+            },
+            400,
+          );
+        }
+        if (error instanceof InvalidConnectorConfigError) {
+          return c.json(
+            {
+              success: false,
+              error: {
+                code: "INVALID_CONNECTOR_CONFIG",
+                message:
+                  "Trusted device registration is only supported for the TDCC connector.",
               },
             },
             400,
