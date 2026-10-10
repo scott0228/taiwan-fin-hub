@@ -1,4 +1,5 @@
 import { createSyncExecution } from "../../features/sync/execution";
+import { prepareCardAuthorizationWrite } from "../../features/sync/card-authorization-write";
 import type { Env } from "../../platform/env";
 import { canonicalSyncLockRowId } from "../../features/sync/lock";
 import {
@@ -95,7 +96,7 @@ export async function prepareMegabankCaptchaSession(env: Env) {
         await encryptJson(
           {
             ...stored,
-            // 首次取得驗證碼時固定虛擬裝置，之後登入都沿用，簡訊驗證才可能只需一次。
+            // 首次取得驗證碼時固定虛擬裝置，之後登入都沿用，但不保證免簡訊。
             ...prepared.device,
             pendingSession: prepared.pendingSession,
             pendingSessionExpiresAt: prepared.pendingSessionExpiresAt,
@@ -265,13 +266,34 @@ export async function syncMegabank(
       ),
     );
   }
-  const newRecords = await persistStagedSyncWrite(env.DB, {
+  const prepared = await prepareCardAuthorizationWrite(
+    env.DB,
+    connectorId,
     records,
+    {
+      sourcePattern: "megabank:card:tx:%",
+      encryptedConfig: settings.encrypted_config,
+      cardId: (row) => {
+        if (!row.source_id.startsWith("megabank:card:tx:")) return undefined;
+        const metadata = JSON.parse(row.raw_payload || "{}") as {
+          cardLast4?: string;
+        };
+        return typeof metadata.cardLast4 === "string" &&
+          /^\d{4}$/.test(metadata.cardLast4)
+          ? metadata.cardLast4
+          : undefined;
+      },
+    },
+  );
+  const newRecords = await persistStagedSyncWrite(env.DB, {
+    records: prepared.records,
     settingsGuard,
-    afterPromoteStatements:
-      bankAccounts.length > 0
+    afterPromoteStatements: [
+      ...prepared.afterPromoteStatements,
+      ...(bankAccounts.length > 0
         ? [linkCanonicalBankAccountsStatement(env.DB, settingsGuard)]
-        : [],
+        : []),
+    ],
     finalizeStatements,
   });
   if (

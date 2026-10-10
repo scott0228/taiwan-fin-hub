@@ -3,6 +3,9 @@ import {
   BrowserRunCapacityError,
   launchBrowserWithRetry,
   connectBrowserWithCancellation,
+  prepareBrowserLoginWithRetry,
+  closeBrowserSession,
+  type ReportBrowserLoginStage,
 } from "../browser.js";
 import puppeteer, {
   type Browser,
@@ -294,21 +297,17 @@ export function createFirstbankConnector(
           assertCaptcha(config.captcha, config.captchaDigitCount);
         }
 
-        browserInstance = await acquireBrowser(
-          browserFetcher,
-          pendingSessionId,
-          {
-            requirePreferredSession: Boolean(
-              pendingSessionId && config.captcha,
-            ),
-          },
-        );
-        const pages = await browserInstance.pages();
-        page = pages[0] ?? (await browserInstance.newPage());
-        await configurePage(page);
-
         let loggedIn = false;
+        let initialCaptcha: CaptchaImage | undefined;
         if (pendingSessionId && config.captcha) {
+          browserInstance = await acquireBrowser(
+            browserFetcher,
+            pendingSessionId,
+            { requirePreferredSession: true },
+          );
+          const pages = await browserInstance.pages();
+          page = pages[0] ?? (await browserInstance.newPage());
+          await configurePage(page);
           if (await resumeAuthenticatedSession(page)) {
             loggedIn = true;
           } else {
@@ -331,10 +330,55 @@ export function createFirstbankConnector(
             }
             loggedIn = true;
           }
-        } else if (config.sessionCookies) {
-          await importCookies(page, config.sessionCookies);
-          await gotoAllowingTimeout(page, LOGIN_URL);
-          loggedIn = await resumeAuthenticatedSession(page);
+        } else {
+          const prepared = await prepareBrowserLoginWithRetry({
+            binding: browserFetcher,
+            connectorId: "firstbank",
+            isRetryable: (error) =>
+              error instanceof FirstbankCaptchaUnavailableError ||
+              error instanceof FirstbankActionTimeoutError,
+            prepare: async (
+              browser,
+              observePage,
+              signal,
+              attempt,
+              reportStage,
+            ) => {
+              const pages = await browser.pages();
+              const page = pages[0] ?? (await browser.newPage());
+              observePage(page);
+              reportStage("configure_page");
+              await configurePage(page);
+              if (attempt === 1 && config.sessionCookies) {
+                reportStage("restore_session");
+                await importCookies(page, config.sessionCookies);
+                await gotoAllowingTimeout(page, LOGIN_URL);
+                if (await resumeAuthenticatedSession(page))
+                  return { page, loggedIn: true, captcha: undefined };
+              }
+              signal.throwIfAborted();
+              if (!recognizeCaptcha)
+                throw new FirstbankVerificationRequiredError(
+                  "第一銀行 session 已失效，需要重新登入。",
+                );
+              try {
+                const captcha = await openLoginAndCaptureCaptcha(
+                  page,
+                  config,
+                  reportStage,
+                );
+                return { page, loggedIn: false, captcha };
+              } catch (error) {
+                if (error instanceof FirstbankAlreadyAuthenticatedError)
+                  return { page, loggedIn: true, captcha: undefined };
+                throw error;
+              }
+            },
+          });
+          browserInstance = prepared.browser;
+          page = prepared.value.page;
+          loggedIn = prepared.value.loggedIn;
+          initialCaptcha = prepared.value.captcha;
         }
 
         if (!loggedIn) {
@@ -343,7 +387,7 @@ export function createFirstbankConnector(
               "第一銀行 session 已失效，需要重新登入。",
             );
           }
-          await loginWithOcr(page, config, recognizeCaptcha);
+          await loginWithOcr(page, config, recognizeCaptcha, initialCaptcha);
         }
         authenticated = true;
 
@@ -397,7 +441,8 @@ export function createFirstbankConnector(
         }
         throw normalized;
       } finally {
-        if (browserInstance) await closeFirstbankBrowser(browserInstance);
+        if (browserInstance)
+          await closeFirstbankBrowser(browserInstance, browserFetcher);
       }
     },
   };
@@ -439,7 +484,8 @@ export async function prepareFirstbankCaptcha(
       captchaImage: `data:image/jpeg;base64,${bytesToBase64(captcha.bytes)}`,
     };
   } finally {
-    if (!preserved) await closeFirstbankBrowser(browserInstance);
+    if (!preserved)
+      await closeFirstbankBrowser(browserInstance, browserFetcher);
   }
 }
 
@@ -450,6 +496,7 @@ async function loginWithOcr(
     imageBytes: ArrayBuffer,
     digitCount: number,
   ) => Promise<string>,
+  initialCaptcha?: CaptchaImage,
 ) {
   let lastError: unknown;
   for (
@@ -459,7 +506,10 @@ async function loginWithOcr(
   ) {
     try {
       if (await resumeAuthenticatedSession(page)) return;
-      const captcha = await openLoginAndCaptureCaptcha(page, config);
+      const captcha =
+        attempt === 1 && initialCaptcha
+          ? initialCaptcha
+          : await openLoginAndCaptureCaptcha(page, config);
       const answer = await recognizeCaptcha(
         toArrayBuffer(captcha.bytes),
         captcha.digitCount,
@@ -501,14 +551,18 @@ async function loginWithOcr(
 async function openLoginAndCaptureCaptcha(
   page: Page,
   config: FirstbankBrowserConfig,
+  reportStage?: ReportBrowserLoginStage,
 ): Promise<CaptchaImage> {
+  reportStage?.("navigate");
   await gotoAllowingTimeout(page, LOGIN_URL);
   await switchLoginPageToTraditionalChinese(page);
   if (await resumeAuthenticatedSession(page)) {
     throw new FirstbankAlreadyAuthenticatedError();
   }
+  reportStage?.("form");
   await openLoginAndFill(page, config);
 
+  reportStage?.("captcha");
   try {
     await page.waitForFunction(
       () => {
@@ -2835,12 +2889,9 @@ async function launchBrowser(browserFetcher: Fetcher): Promise<Browser> {
   });
 }
 
-async function closeFirstbankBrowser(browser: Browser) {
-  try {
-    await browser.close();
-  } catch {
-    // Cleanup must not replace the primary connector result and no provider
-    // response or cookie value is written to logs.
+async function closeFirstbankBrowser(browser: Browser, binding: Fetcher) {
+  if (!(await closeBrowserSession(binding, browser))) {
+    logFirstbankStage("browser-cleanup-failed", {});
   }
 }
 
