@@ -11,7 +11,7 @@
 - Tables：31
 - Explicit indexes：44
 - Other objects：0
-- Migrations：51
+- Migrations：53
 
 ## Tables
 
@@ -43,8 +43,8 @@
 | [`sync_activity_changes`](#sync_activity_changes) | 與金融資料 promotion 同一 transaction 保存的新增紀錄與入帳事件。 | 5 | 1 | 0 |
 | [`sync_activity_details`](#sync_activity_details) | 報告完成時沿用活動配對規則產生的活動展示快照。 | 3 | 1 | 0 |
 | [`sync_activity_runs`](#sync_activity_runs) | 同步執行與排程報告的明確關聯，涵蓋原始同步及成功的手動補救。 | 7 | 1 | 1 |
-| [`sync_jobs`](#sync_jobs) | 每個連接器與同步範圍的排程、鎖定狀態與最近執行結果。 | 19 | 0 | 1 |
-| [`sync_schedule_settings`](#sync_schedule_settings) | 所有使用 inherit 模式之同步工作的全域預設排程。 | 6 | 0 | 0 |
+| [`sync_jobs`](#sync_jobs) | 每個連接器與同步範圍的排程、鎖定狀態與最近執行結果。 | 20 | 0 | 1 |
+| [`sync_schedule_settings`](#sync_schedule_settings) | 所有使用 inherit 模式之同步工作的全域預設排程。 | 7 | 0 | 0 |
 | [`sync_write_staging`](#sync_write_staging) | 同步流程寫入正式資料表前的暫存資料。 | 5 | 0 | 1 |
 | [`tdcc_sync_run_items`](#tdcc_sync_run_items) | 集保持久化同步中，依帳戶、任務與分頁拆分的工作及取得結果。 | 18 | 1 | 2 |
 | [`tdcc_sync_runs`](#tdcc_sync_runs) | 集保 e 存摺跨 Queue invocation 執行的持久化同步記錄與接續狀態。 | 25 | 2 | 2 |
@@ -75,8 +75,8 @@
 | 15 | `opened_date` | 銀行提供的定存起息日；來源未提供時為 NULL。 | TEXT | YES | — | — | — |
 | 16 | `maturity_date` | 銀行提供的定存到期日；不作為自動結清的判定條件。 | TEXT | YES | — | — | — |
 | 17 | `inactive_at` | 同步確認來源不再列出定存的觀測時間，不是銀行實際結清日；有效帳戶為 NULL。 | TEXT | YES | — | — | — |
-| 18 | `loan_category` | 貸款類別，例如 housing（房屋貸款）或 other（其他貸款）。 | TEXT | YES | — | — | — |
-| 19 | `loan_interest_rate` | 貸款年利率百分比；銀行未提供或無法解析時為 NULL。 | REAL | YES | — | — | — |
+| 18 | `loan_interest_rate` | 貸款年利率百分比；銀行未提供或無法解析時為 NULL。 | REAL | YES | — | — | — |
+| 19 | `loan_category` | 貸款類別：housing（房屋貸款）、personal（信用貸款）或 other（其他貸款）。 | TEXT | YES | — | — | — |
 
 #### Foreign keys
 
@@ -110,7 +110,11 @@ CREATE TABLE "bank_accounts" (
   bank_code TEXT,
   account_last4 TEXT,
   canonical_account_id TEXT REFERENCES "bank_accounts" (id),
-  credit_limit INTEGER, opened_date TEXT, maturity_date TEXT, inactive_at TEXT, loan_category TEXT CHECK (loan_category IS NULL OR loan_category IN ('housing', 'other')), loan_interest_rate REAL,
+  credit_limit INTEGER, opened_date TEXT, maturity_date TEXT, inactive_at TEXT, loan_interest_rate REAL, loan_category TEXT
+CHECK (
+  loan_category IS NULL
+  OR loan_category IN ('housing', 'personal', 'other')
+),
   UNIQUE (connector_id, source_id)
 )
 ```
@@ -1361,7 +1365,8 @@ CREATE TABLE sync_activity_runs (
 | 16 | `updated_at` | 同步工作最後更新的時間。 | TEXT | NO | — | — | — |
 | 17 | `schedule_mode` | 排程模式；inherit 使用全域設定，custom 使用工作自己的設定。 | TEXT | NO | 'inherit' | — | — |
 | 18 | `preferred_time` | 每日或每週排程偏好的台北時間。 | TEXT | NO | '06:00' | — | — |
-| 19 | `preferred_weekday` | 每週排程的星期，0 代表週日、6 代表週六。 | INTEGER | NO | 1 | — | — |
+| 19 | `preferred_weekday` | 每週排程的單日相容欄位，0 代表週日、6 代表週六；有星期清單時保存清單第一天。 | INTEGER | NO | 1 | — | — |
+| 20 | `preferred_weekdays` | 每週執行日的 JSON 陣列，0 代表週日、6 代表週六；NULL 沿用 preferred_weekday 單日設定。 | TEXT | YES | — | — | — |
 
 #### Foreign keys
 
@@ -1394,7 +1399,7 @@ CREATE TABLE "sync_jobs" (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL, schedule_mode TEXT NOT NULL DEFAULT 'inherit'
   CHECK (schedule_mode IN ('inherit', 'custom')), preferred_time TEXT NOT NULL DEFAULT '06:00', preferred_weekday INTEGER NOT NULL DEFAULT 1
-  CHECK (preferred_weekday BETWEEN 0 AND 6),
+  CHECK (preferred_weekday BETWEEN 0 AND 6), preferred_weekdays TEXT,
   UNIQUE (connector_id, scope)
 )
 ```
@@ -1413,7 +1418,8 @@ CREATE TABLE "sync_jobs" (
 | 3 | `preferred_time` | 預設每日或每週執行時間，使用台北時間。 | TEXT | NO | — | — | — |
 | 4 | `timezone` | 排程使用的時區，目前為 Asia/Taipei。 | TEXT | NO | — | — | — |
 | 5 | `updated_at` | 全域排程最後更新的時間。 | TEXT | NO | — | — | — |
-| 6 | `preferred_weekday` | 每週排程的預設星期，0 代表週日、6 代表週六。 | INTEGER | NO | 1 | — | — |
+| 6 | `preferred_weekday` | 每週排程的預設單日相容欄位，0 代表週日、6 代表週六；有星期清單時保存清單第一天。 | INTEGER | NO | 1 | — | — |
+| 7 | `preferred_weekdays` | 每週預設執行日的 JSON 陣列，0 代表週日、6 代表週六；NULL 沿用 preferred_weekday 單日設定。 | TEXT | YES | — | — | — |
 
 #### Foreign keys
 
@@ -1433,7 +1439,7 @@ CREATE TABLE "sync_schedule_settings" (
   timezone TEXT NOT NULL,
   updated_at TEXT NOT NULL
 , preferred_weekday INTEGER NOT NULL DEFAULT 1
-  CHECK (preferred_weekday BETWEEN 0 AND 6))
+  CHECK (preferred_weekday BETWEEN 0 AND 6), preferred_weekdays TEXT)
 ```
 
 ### `sync_write_staging`
@@ -1693,6 +1699,8 @@ Migration 是 schema 演進的 source of truth；若要了解某欄位的變更�
 - [`0051_rakuten_sync_job.sql`](../apps/worker/migrations/0051_rakuten_sync_job.sql)
 - [`0052_bank_loan_overview.sql`](../apps/worker/migrations/0052_bank_loan_overview.sql)
 - [`0053_scheduled_sync_loan_debt.sql`](../apps/worker/migrations/0053_scheduled_sync_loan_debt.sql)
+- [`0054_weekly_sync_days.sql`](../apps/worker/migrations/0054_weekly_sync_days.sql)
+- [`0055_personal_loan_category.sql`](../apps/worker/migrations/0055_personal_loan_category.sql)
 
 ## 程式碼導覽
 

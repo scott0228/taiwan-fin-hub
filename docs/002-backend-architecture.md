@@ -1,6 +1,6 @@
 # 後端架構與維護約定
 
-後端執行於 Cloudflare Workers，使用 Hono 提供 API，並透過 Cloudflare D1、Browser Rendering、Workers AI、Cron Triggers 與 Queues 完成資料儲存、銀行登入、驗證碼辨識及排程同步。
+後端執行於 Cloudflare Workers，使用 Hono 提供 API，並透過 Cloudflare D1、Browser Rendering、Workers AI、Cron Triggers、Queues 與 Durable Objects 完成資料儲存、銀行登入、驗證碼辨識、排程同步及兆豐的固定出口。
 
 目前後端採用 **feature-oriented Vertical Slice Architecture**。程式依業務功能分組，而不是將所有 Controller、Service、Repository 分別集中在全域目錄。
 
@@ -208,7 +208,7 @@ SQL 應放在使用它的 feature 附近。只有確實被多個 feature 共用�
 
 Cloudflare Worker 與 HTTP 平台層，目前包含：
 
-- Worker bindings 與 Hono binding types。
+- Worker bindings 與 Hono binding types。兆豐 App API 的對外請求由 `MegabankEgress` 轉送，物件定義見 `platform/megabank-egress-object.ts`。
 - Hono factory。
 - API error response。
 - Demo 唯讀模式。
@@ -216,6 +216,8 @@ Cloudflare Worker 與 HTTP 平台層，目前包含：
 - Zod validation hook。
 - Cloudflare Access JWT 驗證。
 - 設定與加密工具。
+
+連接器設定、推播訂閱與集保同步狀態的加密金鑰統一由 `platform/config.ts` 的 `configEncryptionKey` 取得。`CONFIG_ENCRYPTION_KEY=auto` 使用部署 script 保存的 `GENERATED_CONFIG_ENCRYPTION_KEY`，其餘值沿用自訂金鑰；缺少必要的金鑰時直接失敗，詳細初始化與復原限制見[部署文件](005-deployment.md#1-選擇加密金鑰)。
 
 `platform` 不得依賴任何具體 feature。
 
@@ -620,6 +622,14 @@ sequenceDiagram
 
 ## 同步鎖與排程
 
+每週排程可選擇一至七個星期，所有執行日共用同一個台北開始時間。
+`sync_jobs` 與 `sync_schedule_settings` 的 `preferred_weekdays` 保存星期 JSON 陣列；
+NULL 時在 repository selection 沿用 `[preferred_weekday]`，舊單日設定不需重新儲存。
+API 驗證星期不可重複、至少一天，並按 0 至 6 排序；舊版單日輸入仍可使用。
+`nextSyncRunAt` 從勾選星期找出嚴格晚於目前時間的最近執行時間，
+一般同步及電子發票／集保結案皆使用相同計算。更新預設排程只重算繼承來源；
+Cron、Queue 與預設批次的執行方式維持既有流程。
+
 同一個 connector 的不同同步 scope 共用 canonical connector lock，避免以下工作重疊：
 
 - 手動同步與排程同步。
@@ -646,9 +656,11 @@ invocation 因此不必等待下一個 10 分鐘 Cron，且擁有獨立的 Worke
 逐一執行。是否到期仍由 D1 sync job 狀態判斷；沒有可執行工作時 consumer 不再送出訊息，
 結束本次串接。
 
-這段 20 秒延遲只作用於不同 Queue 工作之間。同一個 connector invocation 的登入頁
-復原可能重新取得 Browser session，由共用 browser adapter 在確認舊 session 關閉後
-處理 acquisition 限流等待與額度重查。登入準備每輪最多 60 秒、共用總預算 180 秒；
+這段 20 秒延遲只作用於不同 Queue 工作之間。同一個 connector invocation 的首次
+Browser session 取得與登入頁復原重開，皆由共用 browser adapter 處理 acquisition
+限流等待與額度重查；重開前須確認舊 session 已關閉。首次建立遇到 `503` 後重試
+收到暫時性 `429`，也會依 `Retry-After`（缺少有效 header 時預設 20 秒）等待後補試，
+每輪最多三次取得嘗試。登入準備每輪最多 60 秒、共用總預算 180 秒；
 額度查詢、取得瀏覽器與限流等待都算入總預算，來源原有較短期限與取消 signal 仍優先適用。
 
 Demo 模式（`DEMO_MODE`）不執行背景同步：Cron 不送出 scheduler 啟動訊息，Queue consumer
