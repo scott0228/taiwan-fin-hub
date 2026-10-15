@@ -229,7 +229,7 @@ export async function setTdccTrustedDevice(
     const credentialsComplete = connectorCatalog[
       connectorId
     ].credentialFields.every(
-      (key) =>
+      ({ key }) =>
         typeof stored[key] === "string" && (stored[key] as string).length > 0,
     );
     if (!credentialsComplete) throw new ConnectorConfigMissingError();
