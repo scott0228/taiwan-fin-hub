@@ -1,5 +1,6 @@
 import {
   createDrizzle,
+  bankAccountPaymentAccounts,
   bankAccounts,
   bankBalanceSnapshots,
   bankTransactionPreferences,
@@ -17,6 +18,7 @@ const preference = alias(bankTransactionPreferences, "preference");
 const balance = alias(bankBalanceSnapshots, "balance");
 const bill = alias(creditCardBills, "b");
 const billAccount = alias(bankAccounts, "a");
+const paymentOverride = alias(bankAccountPaymentAccounts, "payment_override");
 
 // Must match idx_bank_transactions_transaction_day so range scans stay indexed.
 const bankTransactionDay = sql`CASE WHEN length(txn.authorized_at) > 10
@@ -35,6 +37,8 @@ const bankTransactionColumns = {
   accountId: sql<string>`${txn.accountId}`.as("accountId"),
   accountSourceId: sql<string>`${account.sourceId}`.as("accountSourceId"),
   accountName: sql<string>`${account.accountName}`.as("accountName"),
+  cardLast4: sql<string | null>`${txn.cardLast4}`.as("cardLast4"),
+  cardName: sql<string | null>`${txn.cardName}`.as("cardName"),
   institutionName: sql<string>`${account.institutionName}`.as(
     "institutionName",
   ),
@@ -84,6 +88,8 @@ const creditCardBillColumns = {
 };
 
 export type BankTransactionPageRow = {
+  cardLast4?: string | null;
+  cardName?: string | null;
   id: string;
   connectorId: string;
   accountId: string;
@@ -338,4 +344,54 @@ export async function listCreditCardBillsInRange(
     )
     .orderBy(desc(bill.billingPeriod), asc(bill.accountId), asc(bill.id))
     .all();
+}
+
+/** 信用卡／貸款的銀行自動扣繳資料與使用者手動指定的扣款帳戶。 */
+export async function listPaymentAccountSources(db: D1Database) {
+  return createDrizzle(db)
+    .select({
+      id: account.id,
+      autopayStatus: sql<
+        "enabled" | "none" | null
+      >`${account.autopayStatus}`.as("autopayStatus"),
+      autopayBankCode: account.autopayBankCode,
+      autopayAccountLast4: account.autopayAccountLast4,
+      autopayAccountSourceId: account.autopayAccountSourceId,
+      overrideAccountId: paymentOverride.accountId,
+      overridePaymentAccountId: paymentOverride.paymentAccountId,
+    })
+    .from(account)
+    .leftJoin(paymentOverride, eq(paymentOverride.accountId, account.id))
+    .where(
+      and(
+        isNull(account.canonicalAccountId),
+        isNull(account.inactiveAt),
+        sql`${account.accountType} IN ('credit', 'loan')`,
+      ),
+    )
+    .all();
+}
+
+export async function savePaymentAccountOverride(
+  db: D1Database,
+  accountId: string,
+  paymentAccountId: string | null,
+  now: string,
+) {
+  await createDrizzle(db)
+    .insert(bankAccountPaymentAccounts)
+    .values({ accountId, paymentAccountId, createdAt: now, updatedAt: now })
+    .onConflictDoUpdate({
+      target: bankAccountPaymentAccounts.accountId,
+      set: { paymentAccountId, updatedAt: now },
+    });
+}
+
+export async function deletePaymentAccountOverride(
+  db: D1Database,
+  accountId: string,
+) {
+  await createDrizzle(db)
+    .delete(bankAccountPaymentAccounts)
+    .where(eq(bankAccountPaymentAccounts.accountId, accountId));
 }

@@ -1,3 +1,4 @@
+import { depositAccountName } from "../deposit-account-name";
 import type {
   BankAccount,
   BankBalanceSnapshot,
@@ -6,6 +7,7 @@ import type {
 } from "../financial-types";
 import { z } from "zod";
 import { BANK_SYNC_MONTHS } from "../sync-window";
+import { creditCardLiabilityBalance } from "../credit-card-liability";
 
 export const megabankConfigSchema = z.object({
   userId: z.string().min(1).optional(),
@@ -97,8 +99,11 @@ export function parseMegabankData(
     bankAccounts.push({
       sourceId,
       institutionName: "兆豐銀行",
-      accountName:
-        name.replace(/\d{6,}/g, "••••") || `兆豐存款末四碼 ${last4(accountNo)}`,
+      accountName: depositAccountName(
+        name.replace(/\d{6,}/g, "••••"),
+        last4(accountNo),
+        `兆豐存款末四碼 ${last4(accountNo)}`,
+      ),
       accountType: /定存|定期/.test(name) ? "time_deposit" : "savings",
       currency,
       raw: { last4: last4(accountNo) },
@@ -276,6 +281,7 @@ export function parseMegabankData(
         currency,
         description,
         status: pending ? "pending" : "posted",
+        cardLast4: last4(cardNo) || undefined,
         raw: { cardLast4: last4(cardNo) },
       });
     }
@@ -343,7 +349,7 @@ export function parseMegabankData(
     bankBalanceSnapshots.push({
       accountId,
       sourceId: `${accountId}:${asOfAt}`,
-      balance: -(billed + unbilled),
+      balance: creditCardLiabilityBalance(billed, unbilled),
       statementBalance: billed,
       currency,
       asOfAt,

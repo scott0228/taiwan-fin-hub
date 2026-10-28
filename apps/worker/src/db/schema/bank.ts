@@ -38,6 +38,10 @@ export const bankAccounts = sqliteTable(
     openedDate: text("opened_date"),
     maturityDate: text("maturity_date"),
     inactiveAt: text("inactive_at"),
+    autopayStatus: text("autopay_status"),
+    autopayBankCode: text("autopay_bank_code"),
+    autopayAccountLast4: text("autopay_account_last4"),
+    autopayAccountSourceId: text("autopay_account_source_id"),
   },
   (table) => [
     primaryKey({ columns: [table.id] }),
@@ -62,7 +66,22 @@ export const bankAccounts = sqliteTable(
     OR account_type IN ('checking', 'savings', 'credit', 'loan', 'settlement_cash', 'time_deposit', 'stored_value', 'unknown')
   `,
     ),
+    check(
+      "bank_accounts_autopay_status_check",
+      sql`autopay_status IS NULL OR autopay_status IN ('enabled', 'none')`,
+    ),
   ],
+);
+
+export const bankAccountPaymentAccounts = sqliteTable(
+  "bank_account_payment_accounts",
+  {
+    accountId: text("account_id").notNull(),
+    paymentAccountId: text("payment_account_id"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.accountId] })],
 );
 
 export const bankBalanceSnapshots = sqliteTable(
@@ -132,6 +151,8 @@ export const bankTransactions = sqliteTable(
       .default(sql`'posted'`),
     transferPeerId: text("transfer_peer_id"),
     matchedTransactionId: text("matched_transaction_id"),
+    cardLast4: text("card_last4"),
+    cardName: text("card_name"),
   },
   (table) => [
     primaryKey({ columns: [table.id] }),

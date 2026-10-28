@@ -17,6 +17,7 @@
     navItems,
   } from "./navigation-config";
   import { parseViewHash, viewHash } from "./navigation";
+  import { recoverFromChunkLoadError } from "./chunk-reload";
   import { queryClient } from "./query-client";
   import type {
     DetailView,
@@ -148,6 +149,8 @@
   }
   function navigateBack() {
     if (isDetail(view)) navigate("assets");
+    else if (view === "data-sources" && connectorTarget)
+      navigate("data-sources");
     else if (isMobileSetting(view)) navigate("more");
   }
   function toggleMoneyVisibility() {
@@ -168,7 +171,7 @@
     }}
   >
     <aside
-      class="hidden border-r border-white/10 bg-ink px-6 py-7 text-white xl:sticky xl:top-0 xl:flex xl:h-screen xl:flex-col"
+      class="hidden border-r border-white/10 bg-inverse px-6 py-7 text-white xl:sticky xl:top-0 xl:flex xl:h-screen xl:flex-col"
     >
       <div class="px-2">
         <h1 class="text-xl font-semibold tracking-normal">不用記帳</h1>
@@ -199,7 +202,7 @@
         {#each navItems as item (item.view)}
           {@const NavIcon = item.icon}
           <button
-            class={`flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium ${primaryView === item.view ? "bg-ink text-white" : "text-subtle hover:bg-ink/5"}`}
+            class={`flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium ${primaryView === item.view ? "bg-inverse text-white" : "text-subtle hover:bg-ink/5"}`}
             onclick={() => navigate(item.view)}
             ><NavIcon class="size-4" />{item.label}</button
           >
@@ -216,9 +219,11 @@
               {#if mobileSetting}
                 <div class="flex items-center gap-2 md:block">
                   <button
-                    aria-label="返回更多"
+                    aria-label={view === "data-sources" && connectorTarget
+                      ? "返回資料來源清單"
+                      : "返回更多"}
                     class="flex size-10 shrink-0 items-center justify-center rounded-full text-xl text-ink hover:bg-ink/5 md:hidden"
-                    onclick={() => navigate("more")}>←</button
+                    onclick={navigateBack}>←</button
                   >
                   <h1
                     class="truncate text-2xl font-semibold tracking-tight xl:text-3xl"
@@ -319,16 +324,21 @@
                 />
               {/if}
             {/if}
-          {:catch}
-            <section class="min-w-0 py-16" role="alert" aria-live="assertive">
-              <h2 class="text-base font-semibold tracking-tight">
-                頁面載入失敗
-              </h2>
-              <p class="mt-2 text-caption text-subtle">請再試一次。</p>
-              <Button class="mt-5" variant="outline" onclick={retryPage}
-                >重新載入</Button
-              >
-            </section>
+          {:catch error}
+            {@const recovered = recoverFromChunkLoadError(error)}
+            {#if recovered}
+              <EmptyState title="偵測到新版本" body="正在重新整理頁面。" />
+            {:else}
+              <section class="min-w-0 py-16" role="alert" aria-live="assertive">
+                <h2 class="text-base font-semibold tracking-tight">
+                  頁面載入失敗
+                </h2>
+                <p class="mt-2 text-caption text-subtle">請再試一次。</p>
+                <Button class="mt-5" variant="outline" onclick={retryPage}
+                  >重新載入</Button
+                >
+              </section>
+            {/if}
           {/await}
         {/if}
       </main>
@@ -344,7 +354,7 @@
 
     <nav
       aria-label="主要導覽"
-      class="fixed inset-x-0 bottom-0 z-50 grid grid-cols-4 gap-1 border-t border-ink/10 bg-ink px-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 text-white shadow-[0_-8px_28px_rgba(31,41,51,0.12)] md:hidden"
+      class="fixed inset-x-0 bottom-0 z-50 grid grid-cols-4 gap-1 border-t border-ink/10 bg-inverse px-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 text-white shadow-[0_-8px_28px_rgba(31,41,51,0.12)] md:hidden"
     >
       {#each mobilePrimaryViews as mobileView (mobileView)}
         {@const item = navItems.find(

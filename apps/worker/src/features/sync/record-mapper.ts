@@ -76,6 +76,7 @@ export function bankAccountRecord(
 ): SyncWriteRecord {
   const { bankCode, last4 } = deriveBankMatchKey(connectorId, account.sourceId);
   const id = stableId(connectorId, account.sourceId);
+  const autopay = account.autopayAccount;
   return {
     entityType: "bank_account",
     recordKey: id,
@@ -95,6 +96,11 @@ export function bankAccountRecord(
       inactive_at: account.inactiveAt ?? null,
       bank_code: bankCode,
       account_last4: last4,
+      autopay_status:
+        autopay === undefined ? null : autopay === null ? "none" : "enabled",
+      autopay_bank_code: autopay?.bankCode ?? null,
+      autopay_account_last4: autopay?.last4 ?? null,
+      autopay_account_source_id: autopay?.depositSourceId ?? null,
       raw_payload: JSON.stringify(account.raw ?? account),
       created_at: now,
       updated_at: now,
@@ -163,6 +169,8 @@ export function bankTransactionRecord(
       description: transaction.description ?? null,
       counterparty: transaction.counterparty ?? null,
       status: transaction.status ?? "posted",
+      card_last4: transaction.cardLast4 ?? null,
+      card_name: transaction.cardName ?? null,
       transfer_peer_id: transaction.transferPeer
         ? stableId(
             connectorId,

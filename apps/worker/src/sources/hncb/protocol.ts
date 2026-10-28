@@ -1,3 +1,4 @@
+import { depositAccountName } from "../deposit-account-name";
 import type {
   BankAccount,
   BankBalanceSnapshot,
@@ -6,6 +7,7 @@ import type {
 } from "../financial-types";
 import { z } from "zod";
 import { BANK_SYNC_MONTHS } from "../sync-window";
+import { creditCardLiabilityBalance } from "../credit-card-liability";
 
 export const hncbConfigSchema = z.object({
   userId: z.string().min(1).optional(),
@@ -105,7 +107,11 @@ function parseDepositOverview(html: string, asOfAt: string) {
     accounts.push({
       sourceId,
       institutionName: "華南銀行",
-      accountName: `華南${parsed.accountTypeStr || "存款帳戶"}`,
+      accountName: depositAccountName(
+        parsed.accountTypeStr,
+        parsed.accountNo,
+        `華南${parsed.accountTypeStr || "存款帳戶"}`,
+      ),
       accountType: parsed.accountTypeStr.includes("定")
         ? "time_deposit"
         : parsed.accountTypeStr.includes("活")
@@ -286,12 +292,13 @@ function parseCreditCards(
   const statementAmount = currentBill
     ? currentBill.statementAmount || absTransactionSum(currentBill.transactions)
     : 0;
+  // 華南帳單頁沒有已繳金額，以帳單應繳總額作為剩餘應繳。
   const liability = statementAmount + pendingSum;
   if (currentBill || pendingSum > 0 || liability > 0) {
     snapshots.push({
       accountId: mainAccountId,
       sourceId: `snapshot:hncb:credit:${primaryCardLast4}`,
-      balance: -Math.abs(liability),
+      balance: creditCardLiabilityBalance(statementAmount, pendingSum),
       statementBalance: currentBill ? statementAmount : undefined,
       statementClosingDate: currentBill?.statementClosingDate,
       paymentDueDate: currentBill?.paymentDueDate,
@@ -453,6 +460,7 @@ function parseSingleBillHtml(
       amount: parsedRow.amount,
       currency: "TWD",
       status,
+      cardLast4: currentCardLast4 === "main" ? undefined : currentCardLast4,
       raw: parsedRow,
     });
   }

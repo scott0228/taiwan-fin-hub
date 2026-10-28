@@ -8,19 +8,22 @@
 
 ## 目錄
 
-- Tables：32
-- Explicit indexes：46
+- Tables：35
+- Explicit indexes：47
 - Other objects：0
-- Migrations：57
+- Migrations：63
 
 ## Tables
 
 | Table | 用途 | Columns | Foreign keys | Indexes |
 | --- | --- | ---: | ---: | ---: |
-| [`bank_accounts`](#bank_accounts) | 各銀行與信用卡連接器同步回來的帳戶主檔；同一個實體帳戶可能同時存在多個來源記錄。 | 19 | 1 | 1 |
+| [`ai_classification_settings`](#ai_classification_settings) | AI 自動分類的單列設定、掃描進度與每日呼叫用量。 | 18 | 0 | 0 |
+| [`ai_classifications`](#ai_classifications) | AI 對單筆銀行交易的分類判斷結果。 | 7 | 1 | 1 |
+| [`bank_account_payment_accounts`](#bank_account_payment_accounts) | 使用者手動指定的信用卡或貸款扣款帳戶，優先於銀行提供的自動扣繳帳戶。 | 4 | 0 | 0 |
+| [`bank_accounts`](#bank_accounts) | 各銀行與信用卡連接器同步回來的帳戶主檔；同一個實體帳戶可能同時存在多個來源記錄。 | 23 | 1 | 1 |
 | [`bank_balance_snapshots`](#bank_balance_snapshots) | 帳戶在特定時間點的餘額快照，供資產總值與歷史圖表計算。 | 19 | 1 | 2 |
 | [`bank_transaction_preferences`](#bank_transaction_preferences) | 使用者對銀行交易計算方式的個別偏好。 | 4 | 1 | 1 |
-| [`bank_transactions`](#bank_transactions) | 銀行帳戶、信用卡與其他存款型連接器同步回來的交易明細。 | 17 | 3 | 7 |
+| [`bank_transactions`](#bank_transactions) | 銀行帳戶、信用卡與其他存款型連接器同步回來的交易明細。 | 19 | 3 | 7 |
 | [`classification_categories`](#classification_categories) | 交易與發票使用的分類字典，包含系統預設分類與使用者分類。 | 6 | 0 | 1 |
 | [`classification_overrides`](#classification_overrides) | 使用者對單筆目標資料指定的分類覆寫。 | 6 | 1 | 1 |
 | [`classification_rules`](#classification_rules) | 以文字條件自動判斷交易或其他資料分類的規則。 | 14 | 1 | 2 |
@@ -37,7 +40,7 @@
 | [`manual_assets`](#manual_assets) | 使用者手動登錄、無法由銀行或投資連接器同步的資產。 | 6 | 0 | 0 |
 | [`manual_sync_runs`](#manual_sync_runs) | 使用者按下同步後交由 Queue consumer 執行的背景手動同步，讓前端離開或重新整理不影響同步。 | 11 | 0 | 2 |
 | [`net_worth_history`](#net_worth_history) | 按日期保存的淨資產或資產類別歷史數值，用於圖表與歷史查詢。 | 6 | 0 | 2 |
-| [`notification_preferences`](#notification_preferences) | 此單一部署的同步推播偏好設定。 | 5 | 0 | 0 |
+| [`notification_preferences`](#notification_preferences) | 此單一部署的同步推播偏好設定。 | 6 | 0 | 0 |
 | [`push_subscriptions`](#push_subscriptions) | 瀏覽器 Web Push 裝置訂閱資料。 | 6 | 0 | 0 |
 | [`scheduled_sync_batch_results`](#scheduled_sync_batch_results) | 預設排程同步批次中各工作的完成結果。 | 9 | 1 | 0 |
 | [`scheduled_sync_batches`](#scheduled_sync_batches) | 各排程同步批次的狀態與同步前後資產、信用卡及貸款負債快照。 | 14 | 0 | 2 |
@@ -49,6 +52,144 @@
 | [`sync_write_staging`](#sync_write_staging) | 同步流程寫入正式資料表前的暫存資料。 | 5 | 0 | 1 |
 | [`tdcc_sync_run_items`](#tdcc_sync_run_items) | 集保持久化同步中，依帳戶、任務與分頁拆分的工作及取得結果。 | 18 | 1 | 2 |
 | [`tdcc_sync_runs`](#tdcc_sync_runs) | 集保 e 存摺跨 Queue invocation 執行的持久化同步記錄與接續狀態。 | 25 | 2 | 2 |
+
+### `ai_classification_settings`
+
+> 用途：AI 自動分類的單列設定、掃描進度與每日呼叫用量。
+> 注意：id 固定為 default。scan_mode 不為 NULL 時表示有進行中的掃描，由 Queue 逐月處理並由 Cron 恢復。
+
+#### Columns
+
+| 順序 | 欄位 | 意義 | SQLite type | 可為 NULL | 預設值 | PK 順序 | Generated |
+| ---: | --- | --- | --- | :---: | --- | ---: | --- |
+| 1 | `id` | 固定為 default 的單列識別碼。 | TEXT | NO | — | 1 | — |
+| 2 | `enabled` | 是否於同步後自動分類規則無法判斷的交易；0 表示停用，預設停用。 | INTEGER | NO | 0 | — | — |
+| 3 | `enabled_at` | 最近一次啟用的時間；近期掃描只處理此時間之後寫入的交易，啟用前的紀錄由使用者回補時處理。 | TEXT | YES | — | — | — |
+| 4 | `scan_mode` | 進行中的掃描類型：recent 為同步後的近期掃描，backfill 為使用者啟動的過往紀錄回補；NULL 表示沒有進行中的掃描。 | TEXT | YES | — | — | — |
+| 5 | `scan_id` | 進行中掃描的識別碼；開始近期掃描或回補時產生，停用或清除結果時清空。掃描只在識別碼仍相符時寫入結果與進度。 | TEXT | YES | — | — | — |
+| 6 | `scan_month` | 掃描目前處理的月份（YYYY-MM），由新到舊逐月處理。 | TEXT | YES | — | — | — |
+| 7 | `scan_stop_month` | 掃描處理到的最舊月份（YYYY-MM，含）。 | TEXT | YES | — | — | — |
+| 8 | `scan_watermark` | 近期掃描開始時擷取的交易與發票資料浮水印。 | TEXT | YES | — | — | — |
+| 9 | `scanned_watermark` | 最近一次完成掃描時的資料浮水印；與目前浮水印不同時，Cron 會啟動近期掃描。 | TEXT | YES | — | — | — |
+| 10 | `backfill_status` | 過往紀錄回補狀態：idle、running 或 completed。 | TEXT | NO | 'idle' | — | — |
+| 11 | `backfill_classified_count` | 本次回補由 AI 分類的交易數。 | INTEGER | NO | 0 | — | — |
+| 12 | `backfill_undetermined_count` | 本次回補 AI 無法判斷的交易數。 | INTEGER | NO | 0 | — | — |
+| 13 | `backfill_started_at` | 本次回補開始的時間。 | TEXT | YES | — | — | — |
+| 14 | `backfill_completed_at` | 本次回補完成的時間。 | TEXT | YES | — | — | — |
+| 15 | `quota_day` | quota_used 計算的 UTC 日期（YYYY-MM-DD），與 Workers AI 每日免費額度的重置日一致。 | TEXT | YES | — | — | — |
+| 16 | `quota_used` | quota_day 當日已發出的 AI 分類呼叫次數。 | INTEGER | NO | 0 | — | — |
+| 17 | `paused_until` | 因每日呼叫上限或 Workers AI 免費額度用完而暫停到的時間；NULL 表示未暫停。 | TEXT | YES | — | — | — |
+| 18 | `updated_at` | 設定或掃描進度最後更新的時間。 | TEXT | NO | — | — | — |
+
+#### Foreign keys
+
+—
+
+#### Indexes
+
+—
+
+#### DDL
+
+```sql
+CREATE TABLE ai_classification_settings (
+  id TEXT NOT NULL PRIMARY KEY CHECK (id = 'default'),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  enabled_at TEXT,
+  scan_mode TEXT CHECK (scan_mode IS NULL OR scan_mode IN ('recent', 'backfill')),
+  scan_id TEXT,
+  scan_month TEXT,
+  scan_stop_month TEXT,
+  scan_watermark TEXT,
+  scanned_watermark TEXT,
+  backfill_status TEXT NOT NULL DEFAULT 'idle'
+    CHECK (backfill_status IN ('idle', 'running', 'completed')),
+  backfill_classified_count INTEGER NOT NULL DEFAULT 0,
+  backfill_undetermined_count INTEGER NOT NULL DEFAULT 0,
+  backfill_started_at TEXT,
+  backfill_completed_at TEXT,
+  quota_day TEXT,
+  quota_used INTEGER NOT NULL DEFAULT 0,
+  paused_until TEXT,
+  updated_at TEXT NOT NULL
+)
+```
+
+### `ai_classifications`
+
+> 用途：AI 對單筆銀行交易的分類判斷結果。
+> 注意：只套用於分類覆寫、規則、自動轉帳、沖銷與退費都無法判斷的交易。transaction_id 與 classification_overrides 相同，不設外鍵參照 bank_transactions。
+
+#### Columns
+
+| 順序 | 欄位 | 意義 | SQLite type | 可為 NULL | 預設值 | PK 順序 | Generated |
+| ---: | --- | --- | --- | :---: | --- | ---: | --- |
+| 1 | `transaction_id` | 被分類的 bank_transactions 識別碼。 | TEXT | NO | — | 1 | — |
+| 2 | `category_id` | AI 判斷的 classification_categories 識別碼；最高機率低於門檻時為 NULL，表示無法判斷。 | TEXT | YES | — | — | — |
+| 3 | `probability` | AI 對最高機率分類回傳的機率。 | REAL | NO | — | — | — |
+| 4 | `input_hash` | 判斷時送出的交易摘要與配對發票內容的雜湊；內容改變時重新判斷。 | TEXT | NO | — | — | — |
+| 5 | `model` | 執行判斷的 Workers AI 模型。 | TEXT | NO | — | — | — |
+| 6 | `created_at` | 首次判斷的時間。 | TEXT | NO | — | — | — |
+| 7 | `updated_at` | 最近一次判斷的時間。 | TEXT | NO | — | — | — |
+
+#### Foreign keys
+
+| 欄位 | 參照表 | 參照欄位 | ON UPDATE | ON DELETE |
+| --- | --- | --- | --- | --- |
+| `category_id` | `classification_categories` | `id` | NO ACTION | NO ACTION |
+
+#### Indexes
+
+| Index | Unique | Partial | 欄位 | 定義 |
+| --- | :---: | :---: | --- | --- |
+| `idx_ai_classifications_category` | 否 | 否 | `category_id` | `CREATE INDEX idx_ai_classifications_category<br>  ON ai_classifications (category_id)` |
+
+#### DDL
+
+```sql
+CREATE TABLE ai_classifications (
+  transaction_id TEXT NOT NULL PRIMARY KEY,
+  category_id TEXT REFERENCES classification_categories (id),
+  probability REAL NOT NULL,
+  input_hash TEXT NOT NULL,
+  model TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+```
+
+### `bank_account_payment_accounts`
+
+> 用途：使用者手動指定的信用卡或貸款扣款帳戶，優先於銀行提供的自動扣繳帳戶。
+> 注意：兩個帳戶 ID 都不設 FK：帳戶被移除、合併或不再符合條件時視為未設定，改用銀行資料；不以 CASCADE 刪除使用者設定。
+
+#### Columns
+
+| 順序 | 欄位 | 意義 | SQLite type | 可為 NULL | 預設值 | PK 順序 | Generated |
+| ---: | --- | --- | --- | :---: | --- | ---: | --- |
+| 1 | `account_id` | 信用卡或貸款帳戶的 bank_accounts.id。 | TEXT | NO | — | 1 | — |
+| 2 | `payment_account_id` | 指定的扣款存款帳戶 bank_accounts.id；NULL 表示使用者明確選擇不指定。 | TEXT | YES | — | — | — |
+| 3 | `created_at` | 首次手動設定的時間。 | TEXT | NO | — | — | — |
+| 4 | `updated_at` | 手動設定最後更新的時間。 | TEXT | NO | — | — | — |
+
+#### Foreign keys
+
+—
+
+#### Indexes
+
+—
+
+#### DDL
+
+```sql
+CREATE TABLE bank_account_payment_accounts (
+  account_id TEXT NOT NULL PRIMARY KEY,
+  payment_account_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+```
 
 ### `bank_accounts`
 
@@ -78,6 +219,10 @@
 | 17 | `inactive_at` | 同步確認來源不再列出定存的觀測時間，不是銀行實際結清日；有效帳戶為 NULL。 | TEXT | YES | — | — | — |
 | 18 | `loan_interest_rate` | 貸款年利率百分比；銀行未提供或無法解析時為 NULL。 | REAL | YES | — | — | — |
 | 19 | `loan_category` | 貸款類別：housing（房屋貸款）、personal（信用貸款）或 other（其他貸款）。 | TEXT | YES | — | — | — |
+| 20 | `autopay_status` | 銀行頁面揭露的自動扣繳狀態：enabled（已設定）或 none（未設定）；來源未提供時為 NULL。 | TEXT | YES | — | — | — |
+| 21 | `autopay_bank_code` | 自動扣繳帳戶的金融機構代碼；銀行頁面未提供或無法辨識時為 NULL。 | TEXT | YES | — | — | — |
+| 22 | `autopay_account_last4` | 自動扣繳帳戶的帳號末四碼；不保存完整帳號。 | TEXT | YES | — | — | — |
+| 23 | `autopay_account_source_id` | 來源以完整帳號算出的自家存款帳戶 source_id，用於精準對應；只含雜湊，不含完整帳號。 | TEXT | YES | — | — | — |
 
 #### Foreign keys
 
@@ -115,7 +260,8 @@ CREATE TABLE "bank_accounts" (
 CHECK (
   loan_category IS NULL
   OR loan_category IN ('housing', 'personal', 'other')
-),
+), autopay_status TEXT
+  CHECK (autopay_status IS NULL OR autopay_status IN ('enabled', 'none')), autopay_bank_code TEXT, autopay_account_last4 TEXT, autopay_account_source_id TEXT,
   UNIQUE (connector_id, source_id)
 )
 ```
@@ -248,6 +394,8 @@ CREATE TABLE "bank_transaction_preferences" (
 | 15 | `status` | 交易狀態，目前限制為 pending 或 posted。 | TEXT | NO | 'posted' | — | — |
 | 16 | `transfer_peer_id` | 定存衍生活動所配對之活存交易的系統識別碼，供本金轉帳一對一配對；沒有明確配對時為 NULL。 以 NO ACTION FK 參照 bank_transactions.id，刪除被引用交易前須先移轉引用。 | TEXT | YES | — | — | — |
 | 17 | `matched_transaction_id` | 授權對應的已入帳交易 ID，一對一；僅隱藏 pending 且已配對的交易，同 ID 入帳可指向自身。 以 NO ACTION FK 參照 bank_transactions.id，允許自我引用，不自動清空或級聯刪除。 | TEXT | YES | — | — | — |
+| 18 | `card_last4` | 共用信用卡帳戶中實際刷卡的卡號末四碼，由 connector 正規化；只供顯示，不參與交易識別、配對或負債計算。無法確定時為 NULL。 | TEXT | YES | — | — | — |
+| 19 | `card_name` | card_last4 能唯一對應到具名卡片時的卡名；末四碼重複、欄位矛盾或缺少卡名時為 NULL。 | TEXT | YES | — | — | — |
 
 #### Foreign keys
 
@@ -289,7 +437,7 @@ CREATE TABLE "bank_transactions" (
   effective_date TEXT AS (COALESCE(posted_date, authorized_at, '')),
   status TEXT NOT NULL DEFAULT 'posted' CHECK (status IN ('pending', 'posted')),
   transfer_peer_id TEXT REFERENCES "bank_transactions" (id),
-  matched_transaction_id TEXT REFERENCES "bank_transactions" (id),
+  matched_transaction_id TEXT REFERENCES "bank_transactions" (id), card_last4 TEXT, card_name TEXT,
   UNIQUE (connector_id, account_id, source_id)
 )
 ```
@@ -1118,7 +1266,7 @@ CREATE TABLE "net_worth_history" (
 ### `notification_preferences`
 
 > 用途：此單一部署的同步推播偏好設定。
-> 注意：id 固定為 default；成功通知預設關閉，失敗與需要使用者處理預設開啟。
+> 注意：id 固定為 default；成功通知預設關閉，失敗、需要使用者處理與繳款提醒預設開啟。
 
 #### Columns
 
@@ -1129,6 +1277,7 @@ CREATE TABLE "net_worth_history" (
 | 3 | `notify_failed` | 是否在排程同步失敗時顯示推播。 | INTEGER | NO | 1 | — | — |
 | 4 | `notify_needs_user_action` | 是否在同步需要 OTP、CAPTCHA 或重新登入時顯示推播。 | INTEGER | NO | 1 | — | — |
 | 5 | `updated_at` | 推播偏好最後更新的時間。 | TEXT | NO | — | — | — |
+| 6 | `notify_payment_due` | 是否在預設排程同步摘要附上近期繳款提醒；今天或明天到期、扣款未完成或已過期限時，即使成功通知關閉也會送出摘要。 | INTEGER | NO | 1 | — | — |
 
 #### Foreign keys
 
@@ -1147,7 +1296,7 @@ CREATE TABLE "notification_preferences" (
   notify_failed INTEGER NOT NULL DEFAULT 1,
   notify_needs_user_action INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL
-)
+, notify_payment_due INTEGER NOT NULL DEFAULT 1)
 ```
 
 ### `push_subscriptions`
@@ -1760,6 +1909,12 @@ Migration 是 schema 演進的 source of truth；若要了解某欄位的變更�
 - [`0057_sync_job_lock_phase.sql`](../apps/worker/migrations/0057_sync_job_lock_phase.sql)
 - [`0058_fubon_sync_job.sql`](../apps/worker/migrations/0058_fubon_sync_job.sql)
 - [`0059_reward_donation_categories.sql`](../apps/worker/migrations/0059_reward_donation_categories.sql)
+- [`0060_feib_sync_job.sql`](../apps/worker/migrations/0060_feib_sync_job.sql)
+- [`0061_ai_classification.sql`](../apps/worker/migrations/0061_ai_classification.sql)
+- [`0062_bank_transaction_card.sql`](../apps/worker/migrations/0062_bank_transaction_card.sql)
+- [`0063_payment_due_notification.sql`](../apps/worker/migrations/0063_payment_due_notification.sql)
+- [`0064_payment_accounts.sql`](../apps/worker/migrations/0064_payment_accounts.sql)
+- [`0065_ubot_sync_job.sql`](../apps/worker/migrations/0065_ubot_sync_job.sql)
 
 ## 程式碼導覽
 

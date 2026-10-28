@@ -1,7 +1,6 @@
 <script lang="ts">
   import { buildActivityItems } from "@taiwan-fin-hub/shared";
   import { onMount, tick } from "svelte";
-  import { toStore } from "svelte/store";
   import {
     createMutation,
     createInfiniteQuery,
@@ -33,6 +32,7 @@
   import ActivityCategoryChart from "./components/ActivityCategoryChart.svelte";
   import CalculationUpdateDialog from "./components/CalculationUpdateDialog.svelte";
   import CategoryUpdateDialog from "./components/CategoryUpdateDialog.svelte";
+  import CategoryDetailSheet from "./components/CategoryDetailSheet.svelte";
   import type { ApiClient } from "@/shared/api/client";
   import { queryKeys } from "@/shared/api/query-keys";
   import { exchangeRatesQuery } from "@/data/assets/queries";
@@ -82,6 +82,7 @@
     matchInvoicesToTransactions,
   } from "@/data/activity/matching";
   import { getActivityDataStatus } from "./model/load-status";
+  import { createCategorySheet } from "./model/category-sheet.svelte";
   import {
     flowAmountSign,
     formatCompactTwd,
@@ -100,16 +101,20 @@
   );
   let selectedMonth = $state(initialSelectedMonth);
   const activityRange = recentMonthRange(6, activityMonthAnchor);
-  const bank = createQuery(bankRangeQuery(() => api, activityRange));
-  const invoices = createQuery(invoicesRangeQuery(() => api, activityRange));
-  const invoiceMappings = createQuery(
+  const bank = createQuery(() => bankRangeQuery(() => api, activityRange));
+  const invoices = createQuery(() =>
+    invoicesRangeQuery(() => api, activityRange),
+  );
+  const invoiceMappings = createQuery(() =>
     invoiceTransactionMappingsQuery(() => api, activityRange),
   );
-  const trades = createQuery(
+  const trades = createQuery(() =>
     investmentTransactionsRangeQuery(() => api, activityRange),
   );
-  const rates = createQuery(exchangeRatesQuery(() => api));
-  const categoryRows = createQuery(classificationCategoriesQuery(() => api));
+  const rates = createQuery(() => exchangeRatesQuery(() => api));
+  const categoryRows = createQuery(() =>
+    classificationCategoriesQuery(() => api),
+  );
   const qc = useQueryClient();
   let flow = $state<ActivityFlowFilter>("all");
   let source = $state<ActivitySourceFilter>("all");
@@ -147,17 +152,15 @@
       searchDates.from && searchDates.to && searchDates.from > searchDates.to,
     ),
   );
-  const searchResults = createInfiniteQuery(
-    toStore(() =>
-      activitySearchQuery(
-        () => api,
-        submittedSearch,
-        searchDates.from,
-        searchDates.to,
-        source,
-        flow,
-        searchCategory,
-      ),
+  const searchResults = createInfiniteQuery(() =>
+    activitySearchQuery(
+      () => api,
+      submittedSearch,
+      searchDates.from,
+      searchDates.to,
+      source,
+      flow,
+      searchCategory,
     ),
   );
   // Adjacent result pages can share a day and therefore repeat matching context.
@@ -167,28 +170,28 @@
   const bankData = $derived(
     searching
       ? {
-          accounts: $searchResults.data?.pages[0]?.bank.accounts ?? [],
+          accounts: searchResults.data?.pages[0]?.bank.accounts ?? [],
           transactions: uniqueRows(
-            $searchResults.data?.pages.flatMap(
+            searchResults.data?.pages.flatMap(
               (page) => page.bank.transactions,
             ) ?? [],
           ),
         }
-      : $bank.data,
+      : bank.data,
   );
   const invoiceData = $derived(
     searching
       ? uniqueRows(
-          $searchResults.data?.pages.flatMap((page) => page.invoices) ?? [],
+          searchResults.data?.pages.flatMap((page) => page.invoices) ?? [],
         )
-      : $invoices.data,
+      : invoices.data,
   );
   const tradeData = $derived(
     searching
       ? uniqueRows(
-          $searchResults.data?.pages.flatMap((page) => page.trades) ?? [],
+          searchResults.data?.pages.flatMap((page) => page.trades) ?? [],
         )
-      : $trades.data,
+      : trades.data,
   );
   let savedMonthly: {
     flow: ActivityFlowFilter;
@@ -208,6 +211,7 @@
     flow = "all";
     source = "all";
     selectedCategory = null;
+    categorySheet.key = null;
     searchTime = "all";
     searchFrom = "";
     searchTo = "";
@@ -304,9 +308,11 @@
         search = state.activitySearch.query;
         submittedSearch = search;
         detailKey = state.activityDetail ?? null;
+        categorySheet.key = state.categorySheet ?? null;
       } else {
         restoreMonthly();
         detailKey = state?.activityDetail ?? null;
+        categorySheet.key = state?.categorySheet ?? null;
       }
     };
     restoreHistory();
@@ -315,6 +321,14 @@
       window.removeEventListener("popstate", restoreHistory);
     };
   });
+  const categorySheet = createCategorySheet({
+    getSlices: (flow) => (flow === "income" ? incomeSlices : expenseSlices),
+    chooseCategory,
+    isCategorySelected: (flow, category) =>
+      selectedCategory?.flow === flow && selectedCategory.category === category,
+    getListElement: () => activityListEl,
+  });
+  let activityListEl = $state<HTMLElement>();
   let selectedCategory = $state<ActivityCategoryFilter | null>(null);
   let pending = $state<PendingCategoryUpdate | null>(null);
   let pendingCalculation = $state<PendingCalculationUpdate | null>(null);
@@ -347,49 +361,49 @@
     { id: "other", label: "未分類" },
   ];
   const categoryOptions = $derived(
-    $categoryRows.data?.length ? $categoryRows.data : fallbackCategories,
+    categoryRows.data?.length ? categoryRows.data : fallbackCategories,
   );
   const activityDataStatus = $derived(
     getActivityDataStatus(
       searching
         ? [
-            { label: "搜尋結果", isError: $searchResults.isError },
-            { label: "發票配對", isError: $invoiceMappings.isError },
+            { label: "搜尋結果", isError: searchResults.isError },
+            { label: "發票配對", isError: invoiceMappings.isError },
           ]
         : [
             {
               label: "銀行與信用卡",
-              isError: $bank.isError,
+              isError: bank.isError,
             },
             {
               label: "發票",
-              isError: $invoices.isError,
+              isError: invoices.isError,
             },
             {
               label: "發票配對",
-              isError: $invoiceMappings.isError,
+              isError: invoiceMappings.isError,
             },
             {
               label: "投資活動",
-              isError: $trades.isError,
+              isError: trades.isError,
             },
           ],
     ),
   );
   const activitySummaryIncomplete = $derived(activityDataStatus.hasFailure);
   const activityRetryPending = $derived(
-    $searchResults.isFetching ||
-      $bank.isFetching ||
-      $invoices.isFetching ||
-      $invoiceMappings.isFetching ||
-      $trades.isFetching,
+    searchResults.isFetching ||
+      bank.isFetching ||
+      invoices.isFetching ||
+      invoiceMappings.isFetching ||
+      trades.isFetching,
   );
   const categories = $derived(
     Object.fromEntries(
       categoryOptions.map((category) => [category.id, category.label]),
     ),
   );
-  const rateValues = $derived(rateMap($rates.data));
+  const rateValues = $derived(rateMap(rates.data));
   const bankAccounts = $derived(
     new Map((bankData?.accounts ?? []).map((account) => [account.id, account])),
   );
@@ -407,12 +421,12 @@
     matchInvoicesToTransactions(
       activityBankTransactions,
       invoiceData ?? [],
-      $invoiceMappings.data ?? [],
+      invoiceMappings.data ?? [],
     ),
   );
   const rawItems = $derived(
     searching
-      ? ($searchResults.data?.pages.flatMap((page) => page.items) ?? [])
+      ? (searchResults.data?.pages.flatMap((page) => page.items) ?? [])
       : buildActivityItems(
           activityBankTransactions,
           invoiceData ?? [],
@@ -425,8 +439,8 @@
     rawItems.find((item) => activityKey(item) === detailKey),
   );
   const detailInvoiceId = $derived(detailItem?.invoiceId ?? null);
-  const detailInvoice = createQuery(
-    toStore(() => invoiceDetailQuery(() => api, detailInvoiceId)),
+  const detailInvoice = createQuery(() =>
+    invoiceDetailQuery(() => api, detailInvoiceId),
   );
   const cashFlowMonths = recentMonthKeys(6, activityMonthAnchor);
   const months = [...cashFlowMonths].reverse();
@@ -498,7 +512,7 @@
     }),
   );
   const fillingSearchBatch = $derived(
-    searching && !invalidSearchDates && $searchResults.isFetching,
+    searching && !invalidSearchDates && searchResults.isFetching,
   );
   let searchSentinel = $state<HTMLDivElement>();
   $effect(() => {
@@ -506,16 +520,16 @@
       !searchSentinel ||
       !searching ||
       invalidSearchDates ||
-      !$searchResults.hasNextPage ||
-      $searchResults.isFetching ||
-      $searchResults.isError
+      !searchResults.hasNextPage ||
+      searchResults.isFetching ||
+      searchResults.isError
     )
       return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (!entries.some((entry) => entry.isIntersecting)) return;
         observer.disconnect();
-        void $searchResults.fetchNextPage();
+        void searchResults.fetchNextPage();
       },
       { rootMargin: "0px 0px 240px 0px" },
     );
@@ -536,7 +550,7 @@
       unavailableTransactionIds,
     );
   });
-  const categoryMutation = createMutation({
+  const categoryMutation = createMutation(() => ({
     mutationFn: async (payload: {
       transactionId: string;
       categoryId: string;
@@ -564,8 +578,8 @@
       qc.invalidateQueries({ queryKey: queryKeys.classificationRules });
       pending = null;
     },
-  });
-  const calculationMutation = createMutation({
+  }));
+  const calculationMutation = createMutation(() => ({
     mutationFn: (payload: {
       transactionId: string;
       excludedFromCalculation: boolean;
@@ -581,8 +595,8 @@
       );
       qc.invalidateQueries({ queryKey: queryKeys.bank });
     },
-  });
-  const calculationUpdateMutation = createMutation({
+  }));
+  const calculationUpdateMutation = createMutation(() => ({
     mutationFn: async (payload: CalculationUpdateInput) => {
       await api.patch(
         `/api/bank/transactions/${encodeURIComponent(payload.transactionId)}/calculation`,
@@ -631,8 +645,8 @@
       qc.invalidateQueries({ queryKey: queryKeys.bank });
       qc.invalidateQueries({ queryKey: queryKeys.classificationRules });
     },
-  });
-  const mappingMutation = createMutation({
+  }));
+  const mappingMutation = createMutation(() => ({
     mutationFn: (payload: { invoiceId: string; transactionId: string }) =>
       api.put<InvoiceTransactionPreference>(
         `/api/activity/invoice-mappings/${encodeURIComponent(payload.invoiceId)}`,
@@ -644,8 +658,8 @@
       closeDetail();
       showMappingNotice("已完成配對，活動只顯示一筆");
     },
-  });
-  const separationMutation = createMutation({
+  }));
+  const separationMutation = createMutation(() => ({
     mutationFn: (invoiceId: string) =>
       api.delete<InvoiceTransactionPreference>(
         `/api/activity/invoice-mappings/${encodeURIComponent(invoiceId)}`,
@@ -656,7 +670,7 @@
       closeDetail();
       showMappingNotice("已解除配對，兩筆活動將保持分開");
     },
-  });
+  }));
   function openCategory(item: ActivityItem, categoryId: string) {
     if (item.transactionId && categoryId !== item.categoryId)
       pending = {
@@ -693,11 +707,11 @@
     selectedCategory = null;
   }
   function retryActivityData() {
-    if (searching && $searchResults.isError) void $searchResults.refetch();
-    if ($bank.isError) void $bank.refetch();
-    if ($invoices.isError) void $invoices.refetch();
-    if ($invoiceMappings.isError) void $invoiceMappings.refetch();
-    if ($trades.isError) void $trades.refetch();
+    if (searching && searchResults.isError) void searchResults.refetch();
+    if (bank.isError) void bank.refetch();
+    if (invoices.isError) void invoices.refetch();
+    if (invoiceMappings.isError) void invoiceMappings.refetch();
+    if (trades.isError) void trades.refetch();
   }
   function sourceLabel(item: ActivityItem) {
     const label = {
@@ -737,7 +751,7 @@
       };
       return;
     }
-    $calculationMutation.mutate({
+    calculationMutation.mutate({
       transactionId: item.transactionId,
       excludedFromCalculation: false,
     });
@@ -843,7 +857,7 @@
   }
 </script>
 
-{#if !searching && ($bank.isPending || $invoices.isPending || $invoiceMappings.isPending || $trades.isPending)}
+{#if !searching && (bank.isPending || invoices.isPending || invoiceMappings.isPending || trades.isPending)}
   <EmptyState title="載入活動中" body="正在整理銀行、投資與發票資料。" />
 {:else}
   <div class="grid min-w-0 max-w-full gap-6 overflow-x-clip pt-3 md:pt-2">
@@ -904,7 +918,7 @@
     {#if missingMonthlyRates.length > 0}
       <p role="status" class="text-sm text-coral">
         缺少 {missingMonthlyRates.join("、")} 匯率，月份總額與分類圖表尚未包含這些外幣交易。
-        <button type="button" class="underline" onclick={() => $rates.refetch()}
+        <button type="button" class="underline" onclick={() => rates.refetch()}
           >重試匯率</button
         >
       </p>
@@ -1006,7 +1020,8 @@
               : undefined}
             flowSelected={flow === "income" && !selectedCategory}
             dataIncomplete={activitySummaryIncomplete}
-            onSelect={(category) => chooseCategory("income", category)}
+            onSelect={(category) =>
+              categorySheet.handleCategorySelect("income", category)}
             onSelectFlow={() => chooseChartFlow("income")}
           />
           <ActivityCategoryChart
@@ -1018,7 +1033,8 @@
               : undefined}
             flowSelected={flow === "expense" && !selectedCategory}
             dataIncomplete={activitySummaryIncomplete}
-            onSelect={(category) => chooseCategory("expense", category)}
+            onSelect={(category) =>
+              categorySheet.handleCategorySelect("expense", category)}
             onSelectFlow={() => chooseChartFlow("expense")}
           />
         </div>
@@ -1089,6 +1105,7 @@
     <section
       class="min-w-0 max-w-full overflow-hidden border-t border-ink/10 pt-5"
       aria-label="活動列表"
+      bind:this={activityListEl}
     >
       <header class="grid min-w-0 gap-3 pb-4">
         <div
@@ -1148,7 +1165,7 @@
             >
           </div>
         {/if}
-        {#if $calculationMutation.isError}<p
+        {#if calculationMutation.isError}<p
             class="text-sm font-medium text-coral"
           >
             無法更新計算設定，請稍後再試。
@@ -1228,7 +1245,7 @@
                           <ActivityAmount
                             {item}
                             rates={rateValues}
-                            exchangeRates={$rates.data}
+                            exchangeRates={rates.data}
                           />
                         </p>
                         <p class="mt-1 text-xs text-subtle">
@@ -1351,7 +1368,7 @@
                               <ActivityAmount
                                 {item}
                                 rates={rateValues}
-                                exchangeRates={$rates.data}
+                                exchangeRates={rates.data}
                               />
                             </p>
                             <p class="mt-1 text-caption text-subtle">
@@ -1367,31 +1384,47 @@
         </div>
       </div>
     </section>
-    {#if searching && $searchResults.hasNextPage && !invalidSearchDates}
+    {#if searching && searchResults.hasNextPage && !invalidSearchDates}
       <div
         bind:this={searchSentinel}
         data-testid="search-load-more"
         class="flex min-h-11 justify-center items-center"
       >
-        {#if $searchResults.isError}
+        {#if searchResults.isError}
           <Button
             variant="outline"
             class="h-11"
-            disabled={$searchResults.isFetching}
-            onclick={() => $searchResults.fetchNextPage()}>重試載入更多</Button
+            disabled={searchResults.isFetching}
+            onclick={() => searchResults.fetchNextPage()}>重試載入更多</Button
           >
         {:else}
           <p role="status" class="text-sm text-subtle">
-            {$searchResults.isFetching ? "載入中…" : "往下捲動載入更多"}
+            {searchResults.isFetching ? "載入中…" : "往下捲動載入更多"}
           </p>
         {/if}
       </div>
+    {/if}
+    {#if !searching && categorySheet.key && categorySheet.isMobileViewport}
+      <CategoryDetailSheet
+        flow={categorySheet.key.flow}
+        category={categorySheet.key.category}
+        slice={categorySheet.slice}
+        {selectedMonth}
+        monthLabel={selectedMonthLabel}
+        monthKeys={cashFlowMonths}
+        items={rawItems}
+        rates={rateValues}
+        {sourceLabel}
+        onClose={categorySheet.close}
+        onFilter={categorySheet.applyFilter}
+        onOpenDetail={openDetail}
+      />
     {/if}
     {#if detailItem}
       {@const amount = activityDisplayAmount(detailItem)}
       {@const transaction = transactionForItem(detailItem)}
       {@const invoice = invoiceForItem(detailItem)}
-      <div class="fixed inset-0 z-[60] bg-ink/40 md:flex md:justify-end">
+      <div class="fixed inset-0 z-[60] bg-inverse/40 md:flex md:justify-end">
         <button
           aria-label="關閉活動明細"
           class="absolute inset-0 hidden md:block"
@@ -1400,7 +1433,7 @@
         <div
           aria-labelledby="activity-detail-title"
           aria-modal="true"
-          class="relative flex h-full w-full flex-col overflow-hidden bg-white shadow-2xl md:max-w-[32rem]"
+          class="relative flex h-full w-full flex-col overflow-hidden bg-card shadow-2xl md:max-w-[32rem]"
           role="dialog"
           use:swipeBack={{
             enabled:
@@ -1453,7 +1486,7 @@
                   <ActivityAmount
                     item={detailItem}
                     rates={rateValues}
-                    exchangeRates={$rates.data}
+                    exchangeRates={rates.data}
                     detail
                   />
                 </p>
@@ -1531,20 +1564,20 @@
 
             {#if invoice}<section class="border-b border-ink/10 py-5">
                 <h3 class="text-base font-semibold">發票細項</h3>
-                {#if $detailInvoice.isPending}<p
+                {#if detailInvoice.isPending}<p
                     class="mt-3 rounded-xl bg-paper p-4 text-sm text-subtle"
                   >
                     載入發票細項中。
-                  </p>{:else if $detailInvoice.isError}<p
+                  </p>{:else if detailInvoice.isError}<p
                     class="mt-3 rounded-xl bg-coral/10 p-4 text-sm text-coral"
                   >
                     無法載入發票細項，請稍後再試。
-                  </p>{:else if !$detailInvoice.data || $detailInvoice.data.items.length === 0}<p
+                  </p>{:else if !detailInvoice.data || detailInvoice.data.items.length === 0}<p
                     class="mt-3 rounded-xl bg-paper p-4 text-sm text-subtle"
                   >
                     此發票沒有品項明細。
                   </p>{:else}<div class="mt-2 divide-y divide-ink/10">
-                    {#each $detailInvoice.data.items as line (line.id)}<div
+                    {#each detailInvoice.data.items as line (line.id)}<div
                         class="flex items-start justify-between gap-4 py-3"
                       >
                         <div class="min-w-0">
@@ -1572,6 +1605,11 @@
                 <div class="flex items-center justify-between gap-4 py-4">
                   <div>
                     <p class="font-semibold">分類</p>
+                    {#if detailItem.classificationSource === "ai"}<p
+                        class="mt-1 text-caption text-subtle"
+                      >
+                        由 AI 自動分類，可直接修改
+                      </p>{/if}
                     {#if !detailItem.transactionId}<p
                         class="mt-1 text-caption text-subtle"
                       >
@@ -1609,10 +1647,10 @@
                     <Checkbox
                       aria-label={`${detailItem.excludedFromCalculation ? "恢復" : "排除"} ${detailItem.title} 的統計計算`}
                       checked={detailItem.excludedFromCalculation}
-                      disabled={($calculationMutation.isPending &&
-                        $calculationMutation.variables?.transactionId ===
+                      disabled={(calculationMutation.isPending &&
+                        calculationMutation.variables?.transactionId ===
                           detailItem.transactionId) ||
-                        $calculationUpdateMutation.isPending}
+                        calculationUpdateMutation.isPending}
                       onchange={(event: Event) =>
                         handleCalculationChange(detailItem, event)}
                     />
@@ -1647,10 +1685,10 @@
         update={pending}
         {categories}
         matchCount={countMatches(pending)}
-        submitting={$categoryMutation.isPending}
-        failed={$categoryMutation.isError}
+        submitting={categoryMutation.isPending}
+        failed={categoryMutation.isError}
         onCancel={() => (pending = null)}
-        onSubmit={(input) => $categoryMutation.mutate(input)}
+        onSubmit={(input) => categoryMutation.mutate(input)}
       />
     {/if}
     {#if pendingCalculation}
@@ -1658,19 +1696,19 @@
         bind:update={pendingCalculation}
         {categoryOptions}
         matchCount={countMatches(pendingCalculation)}
-        submitting={$calculationUpdateMutation.isPending}
-        failed={$calculationUpdateMutation.isError}
+        submitting={calculationUpdateMutation.isPending}
+        failed={calculationUpdateMutation.isError}
         onCancel={() => (pendingCalculation = null)}
-        onSubmit={(input) => $calculationUpdateMutation.mutate(input)}
+        onSubmit={(input) => calculationUpdateMutation.mutate(input)}
       />
     {/if}
     {#if mappingDialog}<div
         aria-modal="true"
-        class="fixed inset-0 z-[75] flex items-end bg-ink/45 md:items-center md:justify-center md:p-6"
+        class="fixed inset-0 z-[75] flex items-end bg-inverse/45 md:items-center md:justify-center md:p-6"
         role="dialog"
       >
         <div
-          class="max-h-[92vh] w-full overflow-y-auto rounded-t-2xl bg-white p-5 shadow-2xl md:max-w-xl md:rounded-2xl md:p-6"
+          class="max-h-[92vh] w-full overflow-y-auto rounded-t-2xl bg-card p-5 shadow-2xl md:max-w-xl md:rounded-2xl md:p-6"
         >
           <div
             class="mx-auto mb-4 h-1.5 w-14 rounded-full bg-ink/20 md:hidden"
@@ -1739,11 +1777,11 @@
               >
               <Button
                 class="h-12 justify-start gap-3 text-coral"
-                disabled={$separationMutation.isPending}
+                disabled={separationMutation.isPending}
                 variant="outline"
                 onclick={() =>
-                  $separationMutation.mutate(mappingDialog!.invoice.id)}
-                ><Unlink2 class="size-4" />{$separationMutation.isPending
+                  separationMutation.mutate(mappingDialog!.invoice.id)}
+                ><Unlink2 class="size-4" />{separationMutation.isPending
                   ? "解除中…"
                   : "解除並保持分開"}</Button
               >
@@ -1867,13 +1905,13 @@
                   >返回</Button
                 ><Button
                   class="h-12"
-                  disabled={$mappingMutation.isPending}
+                  disabled={mappingMutation.isPending}
                   onclick={() =>
-                    $mappingMutation.mutate({
+                    mappingMutation.mutate({
                       invoiceId: mappingDialog!.invoice.id,
                       transactionId: transaction.id,
                     })}
-                  >{$mappingMutation.isPending ? "配對中…" : "確認配對"}</Button
+                  >{mappingMutation.isPending ? "配對中…" : "確認配對"}</Button
                 >
               </div>
             {:else}<p class="mt-5 text-sm text-coral">
@@ -1881,7 +1919,7 @@
               </p>{/if}
           {/if}
 
-          {#if $mappingMutation.isError || $separationMutation.isError}<p
+          {#if mappingMutation.isError || separationMutation.isError}<p
               class="mt-4 text-sm font-medium text-coral"
             >
               無法更新配對，資料可能已變更，請重新整理後再試。
@@ -1890,7 +1928,7 @@
       </div>{/if}
     {#if mappingNotice}<div
         aria-live="polite"
-        class="fixed left-1/2 top-20 z-[85] flex w-[min(22rem,calc(100vw-2rem))] -translate-x-1/2 items-center gap-3 rounded-xl bg-ink px-4 py-3 text-sm font-semibold text-white shadow-xl"
+        class="fixed left-1/2 top-20 z-[85] flex w-[min(22rem,calc(100vw-2rem))] -translate-x-1/2 items-center gap-3 rounded-xl bg-inverse px-4 py-3 text-sm font-semibold text-white shadow-xl"
       >
         <Check class="size-5 shrink-0 text-lime-300" />{mappingNotice}
       </div>{/if}

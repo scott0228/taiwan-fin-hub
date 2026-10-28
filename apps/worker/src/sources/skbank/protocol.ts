@@ -1,3 +1,5 @@
+import { depositAccountName } from "../deposit-account-name";
+import type { SourceSyncError, SourceSyncErrorSource } from "../sync-error";
 import type {
   BankAccount,
   BankBalanceSnapshot,
@@ -60,10 +62,17 @@ type ParsedAccount = SkbankAccountQuery & {
   accountProperty?: string;
 };
 
-export class SkbankProtocolError extends Error {
+export class SkbankProtocolError
+  extends Error
+  implements SourceSyncErrorSource
+{
   constructor(message = "新光銀行回應格式已變更，暫時無法同步。") {
     super(message);
     this.name = "SkbankProtocolError";
+  }
+
+  toSyncError(): SourceSyncError {
+    return { status: 502, code: "SKBANK_CONNECTION_FAILED" };
   }
 }
 
@@ -223,9 +232,13 @@ function parseAccountDetail(
     nickname ||
     productFullName ||
     (last4 ? `新光銀行存款末四碼 ${last4}` : "新光銀行存款帳戶");
-  const accountName =
-    sanitizeText(baseName, accountNumber) +
-    (currency === "TWD" ? "" : ` (${currency})`);
+  const currencyLabel = currency === "TWD" ? "" : ` (${currency})`;
+  const named = nickname || productFullName;
+  const accountName = depositAccountName(
+    named && sanitizeText(named, accountNumber) + currencyLabel,
+    last4,
+    sanitizeText(baseName, accountNumber) + currencyLabel,
+  );
 
   return [
     {

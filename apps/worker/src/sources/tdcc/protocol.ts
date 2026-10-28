@@ -1,3 +1,5 @@
+import type { ConnectorSessionState } from "@taiwan-fin-hub/shared";
+import type { SourceSyncError, SourceSyncErrorSource } from "../sync-error";
 import type { Connector } from "../types";
 import type {
   BankAccount,
@@ -8,6 +10,7 @@ import type {
   NetWorthHistoryPoint,
 } from "../financial-types";
 import { z } from "zod";
+import { TAIWAN_BANK_NAMES } from "../taiwan-banks";
 import {
   EPassbookClient,
   EPassbookError,
@@ -86,6 +89,23 @@ export const tdccConfigSchema = z.object({
 export type TdccConfig = z.infer<typeof tdccConfigSchema>;
 export function parseTdccConfig(config: unknown) {
   return tdccConfigSchema.parse(config);
+}
+
+/** 帳密完整且保存了登入 token 時，視為可直接同步。 */
+export function describeTdccSession(
+  stored: Record<string, unknown>,
+  credentialsComplete: boolean,
+): Partial<ConnectorSessionState> {
+  const session = stored.session;
+  return {
+    sessionAvailable:
+      credentialsComplete &&
+      Boolean(
+        session &&
+        typeof session === "object" &&
+        typeof (session as Record<string, unknown>).tokenId === "string",
+      ),
+  };
 }
 
 export type TdccHolding = TdccConfig["holdings"][number];
@@ -209,9 +229,19 @@ const SESSION_EXPIRED_CODES = new Set([
 // must drop it from config and have the user request a fresh one.
 const OTP_EXPIRED_CODES = new Set(["V0017"]);
 
-export class TdccOtpExpiredError extends Error {}
+export class TdccOtpExpiredError
+  extends Error
+  implements SourceSyncErrorSource
+{
+  toSyncError(): SourceSyncError {
+    return { status: 400, code: "USER_ACTION_REQUIRED", needsUserAction: true };
+  }
+}
 
-export class TdccConnectionError extends Error {
+export class TdccConnectionError
+  extends Error
+  implements SourceSyncErrorSource
+{
   constructor(
     public readonly code: string,
     message: string,
@@ -219,9 +249,16 @@ export class TdccConnectionError extends Error {
     super(`TDCC 登入或同步失敗（${code}）：${message}`);
     this.name = "TdccConnectionError";
   }
+
+  toSyncError(): SourceSyncError {
+    return { status: 400, code: "TDCC_CONNECTION_FAILED" };
+  }
 }
 
-export class TdccVerificationRequiredError extends Error {
+export class TdccVerificationRequiredError
+  extends Error
+  implements SourceSyncErrorSource
+{
   constructor(
     public readonly channel: "email" | "sms",
     public readonly deliveryTriggered: boolean,
@@ -234,6 +271,17 @@ export class TdccVerificationRequiredError extends Error {
         : "TDCC 登入狀態已失效，請回到設定頁重新驗證。",
     );
     this.name = "TdccVerificationRequiredError";
+  }
+
+  toSyncError(): SourceSyncError {
+    return {
+      status: 400,
+      code:
+        this.channel === "sms"
+          ? "TDCC_SMS_OTP_REQUIRED"
+          : "TDCC_EMAIL_OTP_REQUIRED",
+      needsUserAction: true,
+    };
   }
 }
 
@@ -1127,16 +1175,6 @@ function stringField(value: unknown): string {
     : "";
 }
 
-function stockAccountId(accountRecord: Record<string, unknown>) {
-  return [
-    stringField(accountRecord.brokerNo),
-    stringField(accountRecord.brokerAccount) ||
-      stringField(accountRecord.acctSerNo),
-  ]
-    .filter(Boolean)
-    .join(":");
-}
-
 function toInvestmentPosition(
   holding: TdccConfig["holdings"][number],
 ): Omit<InvestmentPosition, "id" | "connectorId"> {
@@ -1170,56 +1208,13 @@ function toInvestmentPosition(
   };
 }
 
-// Common Taiwan financial institution codes used by TDCC settlement accounts.
-const SETTLEMENT_BANK_NAMES: Record<string, string> = {
-  "004": "台灣銀行",
-  "005": "土地銀行",
-  "006": "合作金庫銀行",
-  "007": "第一銀行",
-  "008": "華南銀行",
-  "009": "彰化銀行",
-  "011": "上海商銀",
-  "012": "台北富邦銀行",
-  "013": "國泰世華銀行",
-  "016": "高雄銀行",
-  "017": "兆豐銀行",
-  "021": "花旗銀行",
-  "048": "王道銀行",
-  "050": "台灣企銀",
-  "052": "渣打銀行",
-  "053": "台中銀行",
-  "054": "京城銀行",
-  "081": "匯豐銀行",
-  "101": "瑞興銀行",
-  "102": "華泰銀行",
-  "103": "新光銀行",
-  "108": "陽信銀行",
-  "118": "板信銀行",
-  "147": "三信銀行",
-  "700": "中華郵政",
-  "803": "聯邦銀行",
-  "805": "遠東銀行",
-  "806": "元大銀行",
-  "807": "永豐銀行",
-  "808": "玉山銀行",
-  "809": "凱基銀行",
-  "810": "星展銀行",
-  "812": "台新銀行",
-  "815": "日盛銀行",
-  "816": "安泰銀行",
-  "822": "中國信託銀行",
-  "823": "將來銀行",
-  "824": "連線銀行",
-  "826": "樂天銀行",
-};
-
 function toSettlementBankAccount(
   input: TdccHolding | TdccCashBalance | TdccCashMovement,
 ): Omit<BankAccount, "id" | "connectorId"> {
   const sourceId = settlementAccountSourceId(input);
   const settlement = parseSettlementSourceId(sourceId);
   const bankName = settlement.bankCode
-    ? SETTLEMENT_BANK_NAMES[settlement.bankCode]
+    ? TAIWAN_BANK_NAMES[settlement.bankCode]
     : undefined;
   const accountName = settlement.accountLast5
     ? `末五碼 ${settlement.accountLast5}`

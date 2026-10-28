@@ -10,8 +10,8 @@ import {
   connectorStateStatement,
   updateConnectorEncryptedConfigIfCurrent,
   linkCanonicalBankAccountsStatement,
-  deactivateMissingCathayLoanAccountsStatement,
 } from "../../../src/features/sync/connector-repository";
+import { deactivateMissingCathayLoanAccountsStatement } from "../../../src/sources/cathaybk/repository";
 import {
   bankAccountRecord,
   bankBalanceSnapshotRecord,
@@ -43,7 +43,18 @@ import {
   listBankAccounts,
   listBankTransactions,
 } from "../../../src/features/bank/repository";
-import { getBankPage } from "../../../src/features/bank/service";
+import {
+  clearPaymentAccount,
+  getBankAccounts,
+  getBankPage,
+  setPaymentAccount,
+} from "../../../src/features/bank/service";
+import {
+  BankAccountNotFoundError,
+  InvalidPaymentAccountError,
+} from "../../../src/features/bank/payment-accounts";
+import type { AutopayAccountHint } from "../../../src/sources/financial-types";
+import { depositAccountName } from "../../../src/sources/deposit-account-name";
 import { rebuildBankDepositHistory } from "../../../src/features/net-worth/service";
 import {
   bankNow,
@@ -130,6 +141,7 @@ describe("同步資料完整性（隔離 D1）", () => {
         "credit_card_bills",
         "bank_transactions",
         "bank_accounts",
+        "bank_account_payment_accounts",
         "sync_write_staging",
         "connector_settings",
       ].map((table) => db.prepare(`DELETE FROM ${table}`)),
@@ -234,6 +246,278 @@ describe("同步資料完整性（隔離 D1）", () => {
         loanInstallmentsTotal: 180,
       }),
     ]);
+  });
+
+  it("扣款帳戶：銀行未取得時保留、明確結果才覆寫，手動設定優先且只採唯一對應", async () => {
+    const deposit = (sourceId: string) =>
+      bankAccountRecord(
+        "fubon",
+        {
+          sourceId,
+          institutionName: "台北富邦銀行",
+          accountName: "活儲存款 末四碼 4321",
+          accountType: "savings",
+          currency: "TWD",
+        },
+        now,
+      );
+    const card = (autopayAccount?: AutopayAccountHint | null) =>
+      bankAccountRecord(
+        "fubon",
+        {
+          sourceId: "credit:fubon:TWD",
+          institutionName: "台北富邦銀行",
+          accountName: "台北富邦信用卡",
+          accountType: "credit",
+          currency: "TWD",
+          autopayAccount,
+        },
+        now,
+      );
+    const cardId = card().recordKey;
+    const depositId = deposit("bank:fubon:4321:aaaa:TWD").recordKey;
+    const payment = async () => {
+      const row = (await getBankAccounts(db)).find(
+        (item) => item.id === cardId,
+      );
+      return {
+        id: row?.paymentAccountId,
+        source: row?.paymentAccountSource,
+        bank: row?.bankAutopay?.status,
+      };
+    };
+
+    await persistStagedSyncWrite(db, {
+      records: [
+        deposit("bank:fubon:4321:aaaa:TWD"),
+        card({ bankCode: "012", last4: "4321" }),
+      ],
+    });
+    expect(await payment()).toEqual({
+      id: depositId,
+      source: "bank",
+      bank: "enabled",
+    });
+
+    // 繳款頁未取得（undefined）時保留上次的扣款帳戶。
+    await persistStagedSyncWrite(db, { records: [card(undefined)] });
+    expect(await payment()).toEqual({
+      id: depositId,
+      source: "bank",
+      bank: "enabled",
+    });
+
+    // 手動「不指定」優先於銀行資料；移除手動設定後恢復銀行資料。
+    await setPaymentAccount(db, cardId, null);
+    expect(await payment()).toEqual({
+      id: null,
+      source: "manual",
+      bank: "enabled",
+    });
+    await clearPaymentAccount(db, cardId);
+    expect((await payment()).source).toBe("bank");
+
+    // 扣款帳戶只能是同幣別存款；對象只能是信用卡或貸款。
+    await expect(setPaymentAccount(db, cardId, cardId)).rejects.toBeInstanceOf(
+      InvalidPaymentAccountError,
+    );
+    await expect(setPaymentAccount(db, depositId, null)).rejects.toBeInstanceOf(
+      BankAccountNotFoundError,
+    );
+
+    // 同銀行代碼與末四碼對到兩個帳戶時不自動帶入。
+    await persistStagedSyncWrite(db, {
+      records: [deposit("bank:fubon:4321:bbbb:TWD")],
+    });
+    expect(await payment()).toEqual({
+      id: null,
+      source: null,
+      bank: "enabled",
+    });
+
+    // 銀行明確顯示未設定自動扣繳時覆寫舊資料。
+    await persistStagedSyncWrite(db, { records: [card(null)] });
+    expect(await payment()).toEqual({ id: null, source: null, bank: "none" });
+  });
+
+  it("銀行未提供扣款帳戶時，以同銀行唯一的同幣別存款推測；不唯一或銀行明確未設定時不推測", async () => {
+    const deposit = (sourceId: string, currency = "TWD") =>
+      bankAccountRecord(
+        "sinopac",
+        {
+          sourceId,
+          institutionName: "永豐銀行",
+          accountType: "savings",
+          currency,
+        },
+        now,
+      );
+    const card = (autopayAccount?: AutopayAccountHint | null) =>
+      bankAccountRecord(
+        "sinopac",
+        {
+          sourceId: "credit:sinopac:TWD",
+          institutionName: "永豐銀行",
+          accountName: "永豐信用卡",
+          accountType: "credit",
+          currency: "TWD",
+          autopayAccount,
+        },
+        now,
+      );
+    const cardId = card().recordKey;
+    const twd = deposit("bank:sinopac:2368:TWD");
+    const payment = async () => {
+      const row = (await getBankAccounts(db)).find(
+        (item) => item.id === cardId,
+      );
+      return [row?.paymentAccountId, row?.paymentAccountSource];
+    };
+
+    // 外幣帳戶不列入：同幣別唯一即推測。
+    const usd = deposit("bank:sinopac:2366:USD", "USD");
+    await persistStagedSyncWrite(db, {
+      records: [twd, usd, card()],
+    });
+    expect(await payment()).toEqual([twd.recordKey, "inferred"]);
+
+    // 外幣卡推測仍只用同幣別帳戶，但可手動指定台幣帳戶扣款；外幣帳戶不能扣台幣款項。
+    const usdCard = bankAccountRecord(
+      "sinopac",
+      {
+        sourceId: "credit:sinopac:USD",
+        institutionName: "永豐銀行",
+        accountName: "永豐信用卡（USD）",
+        accountType: "credit",
+        currency: "USD",
+      },
+      now,
+    );
+    const usdPayment = async () => {
+      const row = (await getBankAccounts(db)).find(
+        (item) => item.id === usdCard.recordKey,
+      );
+      return [row?.paymentAccountId, row?.paymentAccountSource];
+    };
+    await persistStagedSyncWrite(db, { records: [usdCard] });
+    expect(await usdPayment()).toEqual([usd.recordKey, "inferred"]);
+    await setPaymentAccount(db, usdCard.recordKey, twd.recordKey);
+    expect(await usdPayment()).toEqual([twd.recordKey, "manual"]);
+    await expect(
+      setPaymentAccount(db, cardId, usd.recordKey),
+    ).rejects.toBeInstanceOf(InvalidPaymentAccountError);
+
+    // 同銀行有兩個台幣帳戶時無法判斷。
+    await persistStagedSyncWrite(db, {
+      records: [deposit("bank:sinopac:9999:TWD")],
+    });
+    expect(await payment()).toEqual([null, null]);
+
+    // 銀行明確顯示未設定自動扣繳時不推測。
+    await db
+      .prepare("DELETE FROM bank_accounts WHERE source_id = ?")
+      .bind("bank:sinopac:9999:TWD")
+      .run();
+    await persistStagedSyncWrite(db, { records: [card(null)] });
+    expect(await payment()).toEqual([null, null]);
+  });
+
+  it("存款名稱：保留連接器組好的「名稱 末四碼」，泛稱改顯示末碼", async () => {
+    // 合成帳號；國泰 sourceId 含完整帳號，顯示層的末碼為末五碼。
+    const deposit = (
+      connectorId: "cathaybk" | "megabank",
+      sourceId: string,
+      accountName: string,
+    ) =>
+      bankAccountRecord(
+        connectorId,
+        { sourceId, accountName, accountType: "savings", currency: "TWD" },
+        now,
+      );
+    await persistStagedSyncWrite(db, {
+      records: [
+        deposit(
+          "cathaybk",
+          "bank:cathaybk:100000012345",
+          depositAccountName("子帳戶", "100000012345", "國泰臺幣帳戶"),
+        ),
+        deposit("cathaybk", "bank:cathaybk:100000067890", "國泰臺幣帳戶"),
+        deposit(
+          "megabank",
+          "bank:megabank:4321:aaaa:TWD",
+          "兆豐存款末四碼 4321",
+        ),
+      ],
+    });
+    const names = Object.fromEntries(
+      (await getBankAccounts(db)).map((row) => [row.sourceId, row.accountName]),
+    );
+    expect(names).toEqual({
+      "bank:cathaybk:100000012345": "子帳戶 末四碼 2345",
+      "bank:cathaybk:100000067890": "末五碼 67890",
+      "bank:megabank:4321:aaaa:TWD": "末四碼 4321",
+    });
+  });
+
+  it("卡片欄位在重新同步時補上，bank API 只將卡片併入帳戶名稱", async () => {
+    const accountId = "credit:ctbc:TWD";
+    const account = bankAccountRecord(
+      "ctbc",
+      {
+        sourceId: accountId,
+        institutionName: "中國信託商業銀行",
+        accountName: "中國信託信用卡",
+        accountType: "credit",
+        currency: "TWD",
+      },
+      now,
+    );
+    const transaction = (
+      sourceId: string,
+      card: { cardLast4?: string; cardName?: string; postedDate?: string } = {},
+    ) =>
+      bankTransactionRecord(
+        "ctbc",
+        {
+          accountId,
+          sourceId,
+          postedDate: "2026-09-03",
+          amount: -100,
+          currency: "TWD",
+          description: sourceId,
+          status: "posted",
+          ...card,
+        },
+        now,
+      );
+
+    await persistStagedSyncWrite(db, {
+      records: [account, transaction("named"), transaction("suffix-only")],
+    });
+    await persistStagedSyncWrite(db, {
+      records: [
+        account,
+        transaction("named", { cardLast4: "1111", cardName: "合成甲卡" }),
+        transaction("suffix-only", { cardLast4: "3333" }),
+      ],
+    });
+
+    const page = await getBankPage(db, 20);
+    expect(
+      page.transactions.map(({ description, accountName }) => ({
+        description,
+        accountName,
+      })),
+    ).toEqual(
+      expect.arrayContaining([
+        { description: "named", accountName: "合成甲卡 · 1111" },
+        { description: "suffix-only", accountName: "中國信託信用卡 · 3333" },
+      ]),
+    );
+    for (const row of page.transactions) {
+      expect(row).not.toHaveProperty("cardLast4");
+      expect(row).not.toHaveProperty("cardName");
+    }
   });
 
   it("貸款資料缺值時保留既有非空類別、利率、開戶日與繳款欄位", async () => {
@@ -1024,6 +1308,10 @@ describe("同步資料完整性（隔離 D1）", () => {
             amount: -252,
             currency: "TWD",
             description: name,
+            // Authorizations stored before card columns existed have no card.
+            ...(status === "posted"
+              ? { cardLast4: "1234", cardName: "合成卡" }
+              : {}),
             raw: { cardLast4: "1234", authorizationHash },
           },
           now,
@@ -1079,11 +1367,16 @@ describe("同步資料完整性（隔離 D1）", () => {
       expect(
         await db
           .prepare(
-            "SELECT description, status FROM bank_transactions WHERE id = ?",
+            "SELECT description, status, card_last4, card_name FROM bank_transactions WHERE id = ?",
           )
           .bind(target)
           .first(),
-      ).toEqual({ description: "posted1", status: "posted" });
+      ).toEqual({
+        description: "posted1",
+        status: "posted",
+        card_last4: "1234",
+        card_name: "合成卡",
+      });
       expect(
         await db
           .prepare(
@@ -1481,9 +1774,15 @@ describe("同步資料完整性（隔離 D1）", () => {
     ).toBe(true);
     expect(accounts.find((row) => row.currency === "TWD")).toMatchObject({
       accountLast4: "1234",
-      accountName: "末四碼 1234",
+      accountName: "綜合存款 末四碼 1234",
       balance: 2000,
     });
+    // API 顯示層保留連接器組好的「帳戶種類 末四碼」，不改回只有末碼。
+    expect(
+      (await getBankAccounts(db)).find(
+        (row) => row.connectorId === "taishin" && row.currency === "TWD",
+      )?.accountName,
+    ).toBe("綜合存款 末四碼 1234");
     const cathayLoanSourceId = "loan:cathaybk:0000000000000001";
     await persistStagedSyncWrite(db, {
       records: [

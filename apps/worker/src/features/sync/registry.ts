@@ -1,4 +1,9 @@
-import { connectorCatalog, type ConnectorId } from "@taiwan-fin-hub/shared";
+import {
+  connectorCatalog,
+  type ConnectorId,
+  type SyncErrorCode,
+} from "@taiwan-fin-hub/shared";
+import { z } from "zod";
 import type { SyncTrigger } from "../../db";
 import type { Env } from "../../platform/env";
 import {
@@ -47,18 +52,126 @@ import {
   type FubonSyncOverrides,
 } from "../../sources/fubon/sync";
 import {
+  prepareFeibCaptchaSession,
+  syncFeib,
+  type FeibSyncOverrides,
+} from "../../sources/feib/sync";
+import {
   syncCathaybk,
   type CathaySyncOverrides,
 } from "../../sources/cathaybk/sync";
 import { syncCtbc } from "../../sources/ctbc/sync";
 import type { CtbcSyncOverrides } from "../../sources/ctbc/mobile-api";
 import { syncSkbank } from "../../sources/skbank/sync";
+import { syncUbot } from "../../sources/ubot/sync";
 import { syncEsun } from "../../sources/esun/sync";
 import {
   syncNextbank,
   prepareNextbankCaptchaSession,
 } from "../../sources/nextbank/sync";
 import { SYNC_SCOPE_ALL, type SyncOutcome, type SyncScope } from "./types";
+
+const sinopacSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^\d{6}$/)
+    .optional(),
+});
+
+const taishinSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^\d{4,8}$/)
+    .optional(),
+});
+
+const hncbSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^\d{4,8}$/)
+    .optional(),
+});
+
+const rakutenSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^[A-Za-z0-9]{4}$/)
+    .optional(),
+});
+
+const kgibankSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^\d{6}$/)
+    .optional(),
+});
+
+const obankSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^[A-Za-z0-9]{4}$/)
+    .optional(),
+});
+
+const firstbankSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^[A-Za-z0-9]{4,8}$/)
+    .optional(),
+});
+
+const cathaySyncBodySchema = z.object({
+  otp: z.string().min(1).optional(),
+  otpChannel: z.enum(["email", "sms"]).optional(),
+});
+
+const ctbcSyncBodySchema = z
+  .object({
+    verification: z.enum(["check", "email", "restart"]).optional(),
+    otp: z
+      .string()
+      .regex(/^\d{4}$/)
+      .optional(),
+  })
+  .refine((value) => !(value.verification && value.otp));
+
+const megabankSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^\d{5}$/)
+    .optional(),
+  otp: z
+    .string()
+    .regex(/^\d{4,8}$/)
+    .optional(),
+});
+
+const fubonSyncBodySchema = z
+  .object({
+    captcha: z
+      .string()
+      .regex(/^\d{6}$/)
+      .optional(),
+    otp: z
+      .string()
+      .regex(/^\d{6}$/)
+      .optional(),
+  })
+  .refine((value) => !(value.captcha && value.otp));
+
+const feibSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^\d{6}$/)
+    .optional(),
+});
+
+const nextbankSyncBodySchema = z.object({
+  captcha: z
+    .string()
+    .regex(/^[A-Za-z0-9]{1,5}$/)
+    .optional(),
+});
 
 type ConnectorRuntimeDefinition = {
   run: (
@@ -67,7 +180,23 @@ type ConnectorRuntimeDefinition = {
     scope: SyncScope,
     overrides: Record<string, unknown>,
   ) => Promise<SyncOutcome>;
-  prepareChallenge?: (env: Env) => Promise<unknown>;
+  challenge?: ConnectorChallengeDefinition;
+  /** 手動同步可帶的驗證碼／OTP 等接續參數；沒有接續參數的來源省略，route 不讀取 body。 */
+  syncBody?: ConnectorSyncBodyDefinition;
+  /** 電子發票與集保使用 Queue 分段同步，手動同步路由由 route 個別註冊。 */
+  dedicatedSyncRoute?: true;
+};
+
+type ConnectorSyncBodyDefinition = {
+  schema: z.ZodType<Record<string, unknown>>;
+  /** Body 格式不符時回傳的 `INVALID_REQUEST` 訊息。 */
+  invalidMessage: string;
+};
+
+type ConnectorChallengeDefinition = {
+  prepare: (env: Env) => Promise<unknown>;
+  /** 準備驗證碼失敗、且錯誤未宣告代碼時回傳的代碼。 */
+  failureCode: SyncErrorCode;
 };
 
 export const connectorRuntimeRegistry: Record<
@@ -75,6 +204,7 @@ export const connectorRuntimeRegistry: Record<
   ConnectorRuntimeDefinition
 > = {
   einvoice: {
+    dedicatedSyncRoute: true,
     run: async () => {
       throw new Error(
         "Electronic invoice sync must be started through its durable Queue flow.",
@@ -82,6 +212,7 @@ export const connectorRuntimeRegistry: Record<
     },
   },
   tdcc: {
+    dedicatedSyncRoute: true,
     run: async () => {
       throw new Error(
         "TDCC sync must be started through its durable Queue flow.",
@@ -94,10 +225,18 @@ export const connectorRuntimeRegistry: Record<
   cathaybk: {
     run: (env, trigger, _scope, overrides) =>
       syncCathaybk(env, trigger, overrides as CathaySyncOverrides),
+    syncBody: {
+      schema: cathaySyncBodySchema,
+      invalidMessage: "Cathay sync options are invalid.",
+    },
   },
   ctbc: {
     run: (env, trigger, _scope, overrides) =>
       syncCtbc(env, trigger, overrides as CtbcSyncOverrides),
+    syncBody: {
+      schema: ctbcSyncBodySchema,
+      invalidMessage: "中國信託驗證選項格式錯誤。",
+    },
   },
   skbank: {
     run: (env, trigger) => syncSkbank(env, trigger),
@@ -105,52 +244,137 @@ export const connectorRuntimeRegistry: Record<
   sinopac: {
     run: (env, trigger, _scope, overrides) =>
       syncSinopac(env, trigger, overrides as SinopacSyncOverrides),
-    prepareChallenge: prepareSinopacCaptchaSession,
+    syncBody: {
+      schema: sinopacSyncBodySchema,
+      invalidMessage: "Sinopac sync options are invalid.",
+    },
+    challenge: {
+      prepare: prepareSinopacCaptchaSession,
+      failureCode: "SINOPAC_CAPTCHA_FAILED",
+    },
   },
   taishin: {
     run: (env, trigger, _scope, overrides) =>
       syncTaishin(env, trigger, overrides as TaishinSyncOverrides),
-    prepareChallenge: prepareTaishinCaptchaSession,
+    syncBody: {
+      schema: taishinSyncBodySchema,
+      invalidMessage: "Taishin sync options are invalid.",
+    },
+    challenge: {
+      prepare: prepareTaishinCaptchaSession,
+      failureCode: "TAISHIN_CONNECTION_FAILED",
+    },
   },
   hncb: {
     run: (env, trigger, _scope, overrides) =>
       syncHncb(env, trigger, overrides as HncbSyncOverrides),
-    prepareChallenge: prepareHncbCaptchaSession,
+    syncBody: {
+      schema: hncbSyncBodySchema,
+      invalidMessage: "HNCB sync options are invalid.",
+    },
+    challenge: {
+      prepare: prepareHncbCaptchaSession,
+      failureCode: "HNCB_CAPTCHA_FAILED",
+    },
   },
   obank: {
     run: (env, trigger, _scope, overrides) =>
       syncObank(env, trigger, overrides as ObankSyncOverrides),
-    prepareChallenge: prepareObankCaptchaSession,
+    syncBody: {
+      schema: obankSyncBodySchema,
+      invalidMessage: "O-Bank sync options are invalid.",
+    },
+    challenge: {
+      prepare: prepareObankCaptchaSession,
+      failureCode: "OBANK_CAPTCHA_FAILED",
+    },
   },
   nextbank: {
     run: (env, trigger, _scope, overrides) =>
       syncNextbank(env, trigger, overrides),
-    prepareChallenge: prepareNextbankCaptchaSession,
+    syncBody: {
+      schema: nextbankSyncBodySchema,
+      invalidMessage: "將來銀行驗證碼格式不符。",
+    },
+    challenge: {
+      prepare: prepareNextbankCaptchaSession,
+      failureCode: "NEXTBANK_CAPTCHA_FAILED",
+    },
   },
   firstbank: {
     run: (env, trigger, _scope, overrides) =>
       syncFirstbank(env, trigger, overrides as FirstbankSyncOverrides),
-    prepareChallenge: prepareFirstbankCaptchaSession,
+    syncBody: {
+      schema: firstbankSyncBodySchema,
+      invalidMessage: "第一銀行 sync options are invalid.",
+    },
+    challenge: {
+      prepare: prepareFirstbankCaptchaSession,
+      failureCode: "FIRSTBANK_CAPTCHA_FAILED",
+    },
   },
   rakuten: {
     run: (env, trigger, _scope, overrides) =>
       syncRakuten(env, trigger, overrides as RakutenSyncOverrides),
-    prepareChallenge: prepareRakutenCaptchaSession,
+    syncBody: {
+      schema: rakutenSyncBodySchema,
+      invalidMessage: "Rakuten sync options are invalid.",
+    },
+    challenge: {
+      prepare: prepareRakutenCaptchaSession,
+      failureCode: "RAKUTEN_CAPTCHA_FAILED",
+    },
   },
   kgibank: {
     run: (env, trigger, _scope, overrides) =>
       syncKgibank(env, trigger, overrides as KgibankSyncOverrides),
-    prepareChallenge: prepareKgibankCaptchaSession,
+    syncBody: {
+      schema: kgibankSyncBodySchema,
+      invalidMessage: "KGI Bank sync options are invalid.",
+    },
+    challenge: {
+      prepare: prepareKgibankCaptchaSession,
+      failureCode: "KGIBANK_CAPTCHA_FAILED",
+    },
   },
   megabank: {
     run: (env, trigger, _scope, overrides) =>
       syncMegabank(env, trigger, overrides as MegabankSyncOverrides),
-    prepareChallenge: prepareMegabankCaptchaSession,
+    syncBody: {
+      schema: megabankSyncBodySchema,
+      invalidMessage: "兆豐銀行同步選項格式錯誤。",
+    },
+    challenge: {
+      prepare: prepareMegabankCaptchaSession,
+      failureCode: "MEGABANK_CAPTCHA_FAILED",
+    },
   },
   fubon: {
     run: (env, trigger, _scope, overrides) =>
       syncFubon(env, trigger, overrides as FubonSyncOverrides),
-    prepareChallenge: prepareFubonCaptchaSession,
+    syncBody: {
+      schema: fubonSyncBodySchema,
+      invalidMessage: "台北富邦銀行同步選項格式錯誤。",
+    },
+    challenge: {
+      prepare: prepareFubonCaptchaSession,
+      failureCode: "FUBON_CAPTCHA_FAILED",
+    },
+  },
+  feib: {
+    run: (env, trigger, _scope, overrides) =>
+      syncFeib(env, trigger, overrides as FeibSyncOverrides),
+    syncBody: {
+      schema: feibSyncBodySchema,
+      invalidMessage: "遠東商銀同步選項格式錯誤。",
+    },
+    challenge: {
+      prepare: prepareFeibCaptchaSession,
+      failureCode: "FEIB_CAPTCHA_FAILED",
+    },
+  },
+  ubot: {
+    run: (env, trigger) => syncUbot(env, trigger),
   },
 };
 
@@ -174,12 +398,35 @@ export function runConnectorSync(
   );
 }
 
+/** 使用一般手動同步路由的來源；route 依此註冊 `/connectors/:id/sync`。 */
+export const manualSyncConnectorIds = (
+  Object.keys(connectorRuntimeRegistry) as ConnectorId[]
+).filter(
+  (connectorId) => !connectorRuntimeRegistry[connectorId].dedicatedSyncRoute,
+);
+
+export function manualSyncBody(connectorId: ConnectorId) {
+  return connectorRuntimeRegistry[connectorId].syncBody;
+}
+
+/** 有互動驗證碼流程的來源；route 依此註冊 `/connectors/:id/captcha`。 */
+export const challengeConnectorIds = (
+  Object.keys(connectorRuntimeRegistry) as ConnectorId[]
+).filter((connectorId) => connectorRuntimeRegistry[connectorId].challenge);
+
 export function prepareConnectorChallenge(env: Env, connectorId: ConnectorId) {
-  const prepare = connectorRuntimeRegistry[connectorId].prepareChallenge;
-  if (!prepare) {
+  const challenge = connectorRuntimeRegistry[connectorId].challenge;
+  if (!challenge) {
     throw new Error(
       `${connectorId} does not support an interactive challenge.`,
     );
   }
-  return prepare(env);
+  return challenge.prepare(env);
+}
+
+export function challengeFailureCode(connectorId: ConnectorId): SyncErrorCode {
+  return (
+    connectorRuntimeRegistry[connectorId].challenge?.failureCode ??
+    "SYNC_FAILED"
+  );
 }

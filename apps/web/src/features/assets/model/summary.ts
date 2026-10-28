@@ -1,23 +1,12 @@
+import { connectorBankCode } from "@taiwan-fin-hub/shared";
 import type { ExchangeRateRow, ManualAssetRow } from "@/data/assets/types";
+import {
+  cardAccountCount,
+  depositAccountCount,
+} from "@/data/bank/account-groups";
 import type { BankAccountRow, BankData } from "@/data/bank/types";
 import type { InvestmentRow } from "@/data/investments/types";
 import { missingExchangeRateCurrencies } from "@/shared/format/financial";
-
-const CONNECTOR_BANK_CODES: Record<string, string> = {
-  firstbank: "007",
-  hncb: "008",
-  cathaybk: "013",
-  obank: "048",
-  skbank: "103",
-  sinopac: "807",
-  esun: "808",
-  taishin: "812",
-  ctbc: "822",
-  kgibank: "809",
-  megabank: "017",
-  rakuten: "826",
-  fubon: "012",
-};
 
 export interface InstitutionAssetGroup {
   key: string;
@@ -25,6 +14,10 @@ export interface InstitutionAssetGroup {
   accounts: BankAccountRow[];
   cards: BankAccountRow[];
   loans: BankAccountRow[];
+  /** 存款帳戶數；同一帳號的不同幣別只算一個，與銀行的帳戶數一致。 */
+  depositAccountCount: number;
+  /** 信用卡帳戶數；同一帳戶的不同幣別（例如台幣與日幣帳單）只算一個。 */
+  cardAccountCount: number;
   assetTotalTwd: number;
   debtTotalTwd: number;
   loanDebtTotalTwd: number;
@@ -36,6 +29,7 @@ export interface InstitutionAssetGroup {
 
 export interface AssetSummary {
   deposits: BankAccountRow[];
+  depositAccountCount: number;
   cards: BankAccountRow[];
   loans: BankAccountRow[];
   bankTotal: number;
@@ -52,8 +46,7 @@ export interface AssetSummary {
 }
 
 function institutionKey(account: BankAccountRow) {
-  const bankCode =
-    account.bankCode ?? CONNECTOR_BANK_CODES[account.connectorId];
+  const bankCode = account.bankCode ?? connectorBankCode(account.connectorId);
   return bankCode ? `bank:${bankCode}` : `connector:${account.connectorId}`;
 }
 
@@ -168,6 +161,8 @@ export function calculateAssetSummary({
             Math.abs(toTwd(b.balance ?? 0, b.currency)) -
             Math.abs(toTwd(a.balance ?? 0, a.currency)),
         ),
+        depositAccountCount: depositAccountCount(accounts),
+        cardAccountCount: cardAccountCount(cards),
         assetTotalTwd: accounts.reduce(
           (sum, account) => sum + toTwd(account.balance ?? 0, account.currency),
           0,
@@ -226,6 +221,7 @@ export function calculateAssetSummary({
 
   return {
     deposits,
+    depositAccountCount: depositAccountCount(deposits),
     cards,
     loans,
     bankTotal,

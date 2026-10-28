@@ -1,4 +1,5 @@
 import {
+  bankAccounts,
   createDrizzle,
   notificationPreferences,
   pushSubscriptions,
@@ -7,7 +8,8 @@ import type {
   NotificationPreferences,
   PushSubscriptionInput,
 } from "@taiwan-fin-hub/shared";
-import { asc, count, eq, sql } from "drizzle-orm";
+import { and, asc, count, eq, isNull, sql } from "drizzle-orm";
+import type { MaturingTimeDepositRow } from "./deposit-maturity";
 
 export type PushSubscriptionRow = {
   id: string;
@@ -22,6 +24,7 @@ const DEFAULT_PREFERENCES: NotificationPreferences = {
   success: false,
   failed: true,
   needsUserAction: true,
+  paymentDue: true,
 };
 
 export async function listPushSubscriptions(db: D1Database) {
@@ -111,6 +114,7 @@ export async function getNotificationPreferences(db: D1Database) {
       success: notificationPreferences.notifySuccess,
       failed: notificationPreferences.notifyFailed,
       needsUserAction: notificationPreferences.notifyNeedsUserAction,
+      paymentDue: notificationPreferences.notifyPaymentDue,
     })
     .from(notificationPreferences)
     .where(eq(notificationPreferences.id, "default"))
@@ -121,6 +125,7 @@ export async function getNotificationPreferences(db: D1Database) {
     success: Boolean(row.success),
     failed: Boolean(row.failed),
     needsUserAction: Boolean(row.needsUserAction),
+    paymentDue: Boolean(row.paymentDue),
   } satisfies NotificationPreferences;
 }
 
@@ -136,6 +141,7 @@ export async function saveNotificationPreferences(
       notifySuccess: preferences.success ? 1 : 0,
       notifyFailed: preferences.failed ? 1 : 0,
       notifyNeedsUserAction: preferences.needsUserAction ? 1 : 0,
+      notifyPaymentDue: preferences.paymentDue ? 1 : 0,
       updatedAt: now,
     })
     .onConflictDoUpdate({
@@ -144,6 +150,7 @@ export async function saveNotificationPreferences(
         notifySuccess: preferences.success ? 1 : 0,
         notifyFailed: preferences.failed ? 1 : 0,
         notifyNeedsUserAction: preferences.needsUserAction ? 1 : 0,
+        notifyPaymentDue: preferences.paymentDue ? 1 : 0,
         updatedAt: now,
       },
     });
@@ -155,6 +162,30 @@ export async function countPushSubscriptions(db: D1Database) {
     .from(pushSubscriptions)
     .get();
   return row?.count ?? 0;
+}
+
+/** 指定日期到期的定存，包含已失效的帳戶，由呼叫端判斷是否在到期當天才失效。 */
+export async function listMaturingTimeDeposits(
+  db: D1Database,
+  maturityDate: string,
+): Promise<MaturingTimeDepositRow[]> {
+  return createDrizzle(db)
+    .select({
+      id: bankAccounts.id,
+      institutionName: bankAccounts.institutionName,
+      maturityDate: bankAccounts.maturityDate,
+      inactiveAt: bankAccounts.inactiveAt,
+    })
+    .from(bankAccounts)
+    .where(
+      and(
+        eq(bankAccounts.accountType, "time_deposit"),
+        isNull(bankAccounts.canonicalAccountId),
+        eq(bankAccounts.maturityDate, maturityDate),
+      ),
+    )
+    .orderBy(asc(bankAccounts.institutionName), asc(bankAccounts.id))
+    .all();
 }
 
 export function normalizePushSubscription(input: PushSubscriptionInput) {

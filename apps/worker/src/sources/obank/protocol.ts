@@ -1,3 +1,4 @@
+import { depositAccountName } from "../deposit-account-name";
 import type {
   BankAccount,
   BankBalanceSnapshot,
@@ -80,13 +81,16 @@ export function parseObankData(
   const bankAccounts: ObankData["bankAccounts"] = accounts.map((account) => ({
     sourceId: account.sourceId,
     institutionName: "王道銀行",
-    accountName:
+    accountName: depositAccountName(
+      account.name,
+      account.last4,
       account.name ||
-      (account.last5
-        ? `${account.type === "time_deposit" ? "定存" : "存款"}末五碼 ${account.last5}`
-        : account.type === "time_deposit"
-          ? "王道銀行定存"
-          : "王道銀行存款帳戶"),
+        (account.last5
+          ? `${account.type === "time_deposit" ? "定存" : "存款"}末五碼 ${account.last5}`
+          : account.type === "time_deposit"
+            ? "王道銀行定存"
+            : "王道銀行存款帳戶"),
+    ),
     accountType: account.type,
     openedDate: account.openedDate,
     maturityDate: account.maturityDate,
@@ -400,6 +404,11 @@ function accountSourceId(
   currency: string,
 ) {
   return `bank:obank:${type}:${last4 || "unknown"}:${stableHash(externalId)}:${currency}`;
+}
+
+/** 王道存款 sourceId（`bank:obank:<類型>:<末四碼>:<識別雜湊>:<幣別>`）多一段帳戶類型，末四碼位於第四段。 */
+export function obankDepositAccountFromSourceId(sourceId: string) {
+  return sourceId.split(":")[3] ?? "";
 }
 
 function sanitizeAccount(account: ParsedAccount) {

@@ -1,3 +1,5 @@
+import { depositAccountName } from "../deposit-account-name";
+import type { SourceSyncError, SourceSyncErrorSource } from "../sync-error";
 import type { SyncResult } from "../types";
 import {
   connectBrowserWithCancellation,
@@ -20,6 +22,7 @@ import type {
 } from "../financial-types";
 import { BANK_SYNC_MONTHS } from "../sync-window";
 import { reportSyncProgress } from "../sync-progress";
+import { retryPostLoginStep } from "../post-login-retry";
 import { isNoCreditCardMessage } from "../credit-card-status";
 import {
   type CathaybkConfig,
@@ -61,10 +64,17 @@ const TRUST_DEVICE_CONTEXT_PATTERN =
 const TRUST_DEVICE_CONFIRM_PATTERN =
   /確定加入|確認加入|完成設定|^確定$|^確認$|^完成$/;
 
-export class CathayVerificationRequiredError extends Error {
+export class CathayVerificationRequiredError
+  extends Error
+  implements SourceSyncErrorSource
+{
   constructor(message: string) {
     super(message);
     this.name = "CathayVerificationRequiredError";
+  }
+
+  toSyncError(): SourceSyncError {
+    return { status: 400, code: "USER_ACTION_REQUIRED", needsUserAction: true };
   }
 }
 
@@ -77,6 +87,14 @@ export class CathayOtpChannelRequiredError extends CathayVerificationRequiredErr
     super(message);
     this.name = "CathayOtpChannelRequiredError";
   }
+
+  toSyncError(): SourceSyncError {
+    return {
+      status: 400,
+      code: "CATHAY_OTP_CHANNEL_REQUIRED",
+      needsUserAction: true,
+    };
+  }
 }
 
 export class CathayOtpRequiredError extends CathayVerificationRequiredError {
@@ -87,6 +105,17 @@ export class CathayOtpRequiredError extends CathayVerificationRequiredError {
     super(message);
     this.name = "CathayOtpRequiredError";
   }
+
+  toSyncError(): SourceSyncError {
+    return {
+      status: 400,
+      code:
+        this.channel === "sms"
+          ? "CATHAY_SMS_OTP_REQUIRED"
+          : "CATHAY_EMAIL_OTP_REQUIRED",
+      needsUserAction: true,
+    };
+  }
 }
 
 export class CathayOtpInvalidError extends CathayVerificationRequiredError {
@@ -96,12 +125,24 @@ export class CathayOtpInvalidError extends CathayVerificationRequiredError {
     super(message);
     this.name = "CathayOtpInvalidError";
   }
+
+  toSyncError(): SourceSyncError {
+    return { status: 400, code: "CATHAY_OTP_INVALID", needsUserAction: true };
+  }
 }
 
 export class CathayOtpSessionExpiredError extends CathayVerificationRequiredError {
   constructor() {
     super("國泰世華驗證工作階段已逾時，請重新同步後再取得驗證碼。");
     this.name = "CathayOtpSessionExpiredError";
+  }
+
+  toSyncError(): SourceSyncError {
+    return {
+      status: 400,
+      code: "CATHAY_OTP_SESSION_EXPIRED",
+      needsUserAction: true,
+    };
   }
 }
 
@@ -275,18 +316,28 @@ async function scrapeWithBrowser(
 
     reportSyncProgress("fetching");
     console.log("[cathaybk] collecting deposit accounts");
+    // 每個階段都從導覽開始；暫時性載入逾時在同一登入工作階段內重跑一次。
+    const activePage = page;
+    const retryStep = <T>(step: string, run: () => Promise<T>) =>
+      retryPostLoginStep({ connectorId: "cathaybk", step }, run);
     phase = "deposits";
-    const deposits = await scrapeDeposits(page, syncWindowDays);
+    const deposits = await retryStep("deposits", () =>
+      scrapeDeposits(activePage, syncWindowDays),
+    );
 
     phase = "foreign_deposits";
-    const foreignDeposits = await scrapeForeignDeposits(page);
+    const foreignDeposits = await retryStep("foreign_deposits", () =>
+      scrapeForeignDeposits(activePage),
+    );
 
     console.log("[cathaybk] collecting credit cards");
     phase = "credit_cards";
-    const cards = await scrapeCreditCards(page);
+    const cards = await retryStep("credit_cards", () =>
+      scrapeCreditCards(activePage),
+    );
 
     phase = "loans";
-    const loans = await scrapeLoans(page);
+    const loans = await retryStep("loans", () => scrapeLoans(activePage));
 
     phase = "logout";
     const trustedState = await captureCathayTrustedState(page);
@@ -1206,7 +1257,9 @@ interface DomAccount {
   currency: string;
 }
 
-async function scrapeDomAccounts(page: Page): Promise<DomAccount[]> {
+async function scrapeDomAccounts(
+  page: Page,
+): Promise<{ accounts: DomAccount[]; unparsedCount: number }> {
   return page.evaluate(() => {
     const results: Array<{
       acctNo: string;
@@ -1215,12 +1268,14 @@ async function scrapeDomAccounts(page: Page): Promise<DomAccount[]> {
       availableBalance: number;
       currency: string;
     }> = [];
+    let unparsedCount = 0;
     const buttons = Array.from(
       document.querySelectorAll<HTMLButtonElement>("button"),
     );
     for (const btn of buttons) {
       const text = btn.textContent?.trim() ?? "";
       if (!/^\d{10,}$/.test(text)) continue;
+      let parsed = false;
       let el: Element | null = btn;
       for (let i = 0; i < 10; i++) {
         el = el?.parentElement ?? null;
@@ -1228,6 +1283,8 @@ async function scrapeDomAccounts(page: Page): Promise<DomAccount[]> {
         const rowText = (el as HTMLElement).innerText?.trim() ?? "";
         if (rowText.includes("$") && rowText.length < 200) {
           const amounts = rowText.match(/\$([\d,]+)/g) ?? [];
+          // 有 $ 但沒有數字（例如 $—）時不能當成 0 元，交由 unparsedCount 使同步失敗。
+          if (!amounts[0]) break;
           const parseAmt = (s: string) =>
             parseInt(s.replace(/[$,]/g, ""), 10) || 0;
           results.push({
@@ -1237,15 +1294,17 @@ async function scrapeDomAccounts(page: Page): Promise<DomAccount[]> {
                 .split(text)[0]
                 ?.replace(/[●\s]+/g, " ")
                 .trim() || "臺幣存款",
-            balance: amounts[0] ? parseAmt(amounts[0]) : 0,
+            balance: parseAmt(amounts[0]),
             availableBalance: amounts[1] ? parseAmt(amounts[1]) : 0,
             currency: "TWD",
           });
+          parsed = true;
           break;
         }
       }
+      if (!parsed) unparsedCount += 1;
     }
-    return results;
+    return { accounts: results, unparsedCount };
   });
 }
 
@@ -1575,18 +1634,38 @@ async function scrapeDeposits(
   console.log("[cathaybk] deposit page opened");
   assertCathayNotLoggedOut(page);
 
-  // Wait for account number buttons to render
-  await page
-    .waitForFunction(
+  // 帳戶清單沒出現時不能當成沒有存款帳戶：目前沒有已確認的無帳戶頁面，
+  // 逾時視為頁面未載入完成（可由登入後步驟重試重跑），而不是空資料。
+  try {
+    await page.waitForFunction(
       () =>
         Array.from(document.querySelectorAll("button")).some((b) =>
           /^\d{10,}$/.test(b.textContent?.trim() ?? ""),
         ),
       { timeout: 15000 },
-    )
-    .catch(() => null);
+    );
+  } catch (error) {
+    if (!(error instanceof TimeoutError)) throw error;
+    assertCathayNotLoggedOut(page);
+    const bodyTextLength = await page
+      .evaluate(() => document.body?.innerText.trim().length ?? 0)
+      .catch(() => undefined);
+    console.warn(
+      JSON.stringify({
+        event: "cathaybk_deposit_overview_unavailable",
+        currentUrl: safeCathayDiagnosticUrl(page.url()),
+        bodyTextLength,
+      }),
+    );
+    throw new Error("國泰世華存款總覽沒有載入帳戶清單，未更新資料。", {
+      cause: error,
+    });
+  }
 
-  const accounts = await scrapeDomAccounts(page);
+  const { accounts, unparsedCount } = await scrapeDomAccounts(page);
+  if (unparsedCount > 0) {
+    throw new Error("國泰世華存款總覽有帳戶無法讀取餘額，未更新資料。");
+  }
   console.log(`[cathaybk] found ${accounts.length} deposit accounts`);
 
   for (const acct of accounts) {
@@ -1595,7 +1674,11 @@ async function scrapeDeposits(
     bankAccounts.push({
       sourceId,
       institutionName: "國泰世華銀行",
-      accountName: acct.accountTypeName || "國泰臺幣帳戶",
+      accountName: depositAccountName(
+        acct.accountTypeName,
+        acct.acctNo,
+        acct.accountTypeName || "國泰臺幣帳戶",
+      ),
       accountType: "savings",
       currency: acct.currency,
       raw: acct,

@@ -19,9 +19,14 @@ import type { Env } from "../../../src/platform/env";
 
 const mocks = vi.hoisted(() => ({ runConnectorSync: vi.fn() }));
 
-vi.mock("../../../src/features/sync/registry", () => ({
+vi.mock("../../../src/features/sync/registry", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("../../../src/features/sync/registry")
+  >()),
   runConnectorSync: mocks.runConnectorSync,
   prepareConnectorChallenge: vi.fn(),
+  challengeConnectorIds: [],
+  challengeFailureCode: vi.fn(),
 }));
 
 import {

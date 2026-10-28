@@ -38,11 +38,12 @@
   } = $props();
 
   const queryClient = useQueryClient();
-  const config = createQuery(notificationConfigQuery(() => api));
+  const config = createQuery(() => notificationConfigQuery(() => api));
   const defaults: NotificationPreferences = {
     success: false,
     failed: true,
     needsUserAction: true,
+    paymentDue: true,
   };
   let support = $state<PushSupport>({ supported: false });
   let subscription = $state<PushSubscription | null>(null);
@@ -51,8 +52,8 @@
   let feedback = $state<{ tone: "success" | "error"; text: string } | null>(
     null,
   );
-  const preferences = $derived($config.data?.preferences ?? defaults);
-  const serverEnabled = $derived($config.data?.enabled ?? false);
+  const preferences = $derived(config.data?.preferences ?? defaults);
+  const serverEnabled = $derived(config.data?.enabled ?? false);
   const subscribed = $derived(Boolean(subscription));
 
   onMount(() => {
@@ -86,13 +87,13 @@
   }
 
   async function enablePush() {
-    if (!serverEnabled || !$config.data?.publicKey) return;
+    if (!serverEnabled || !config.data?.publicKey) return;
     busy = true;
     feedback = null;
     try {
       const previousId = localStorage.getItem("taiwan-fin-hub-push-id");
       await registerPushServiceWorker();
-      const current = await subscribeToPush($config.data.publicKey);
+      const current = await subscribeToPush(config.data.publicKey);
       const registered = await api.post<PushSubscriptionRegistration>(
         "/api/notifications/subscriptions",
         subscriptionInput(current),
@@ -333,7 +334,7 @@
           >
             通知內容
           </p>
-          {#each [toggleButton("同步失敗", "連接器暫時無法完成同步", "failed"), toggleButton("需要重新驗證", "需要 OTP、CAPTCHA 或重新登入", "needsUserAction"), toggleButton("同步完成", "排程同步成功完成（預設關閉）", "success")] as item (item.key)}
+          {#each [toggleButton("同步失敗", "連接器暫時無法完成同步", "failed"), toggleButton("需要重新驗證", "需要 OTP、CAPTCHA 或重新登入", "needsUserAction"), toggleButton("同步完成", "排程同步成功完成（預設關閉）", "success"), toggleButton("繳款與定存提醒", "排程同步通知附上 5 天內的應繳款與今天到期的定存；定存到期、繳款明天到期或扣款未完成時，同步成功也會通知", "paymentDue")] as item (item.key)}
             <button
               type="button"
               role="switch"
