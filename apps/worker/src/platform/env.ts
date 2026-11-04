@@ -15,6 +15,7 @@ export interface Env {
   AI: Ai;
   MEGABANK_EGRESS: DurableObjectNamespace;
   FUBON_EGRESS: DurableObjectNamespace;
+  CRYPTO_BROWSER_EGRESS: DurableObjectNamespace;
   CONFIG_ENCRYPTION_KEY?: string;
   GENERATED_CONFIG_ENCRYPTION_KEY?: string;
   VAPID_PUBLIC_KEY?: string;
@@ -31,6 +32,8 @@ export interface Env {
 
 export type Variables = {
   connectorId: ConnectorId;
+  /** Access 驗證後的登入 email；Demo、本機略過登入或 service token 時沒有值。 */
+  accessEmail?: string;
 };
 
 export type AppBindings = {

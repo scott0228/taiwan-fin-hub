@@ -193,6 +193,18 @@ describe("同步鎖與原子寫入（隔離 D1）", () => {
       expect(await findSyncJob(db, "esun", "all")).toMatchObject({
         preferred_weekdays: [0, 1, 3, 5],
       });
+      // 舊 migration 建立的繼承工作可能保留過時排程；計算下次執行仍須以預設排程為準。
+      await db
+        .prepare(
+          `UPDATE sync_jobs SET interval_minutes = 1440, preferred_time = '05:00',
+           preferred_weekday = 2, preferred_weekdays = '[2]' WHERE id = 'esun:all'`,
+        )
+        .run();
+      expect(await findSyncJob(db, "esun", "all")).toMatchObject({
+        interval_minutes: 10080,
+        preferred_time: "06:00",
+        preferred_weekdays: [0, 1, 3, 5],
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -238,8 +250,8 @@ describe("同步鎖與原子寫入（隔離 D1）", () => {
   it("中信沿用預設或自訂每小時排程，同日再次到期仍可加入預設批次", async () => {
     const db = harness.binding;
     const current = "2026-10-12T00:00:00.000Z";
-    await db.batch([
-      ...["ctbc", "esun"].flatMap((connector) => [
+    await db.batch(
+      ["ctbc", "esun"].flatMap((connector) => [
         db
           .prepare(
             `INSERT INTO sync_jobs (id, connector_id, scope, enabled, schedule_mode, interval_minutes, preferred_time, next_run_at, created_at, updated_at)
@@ -252,7 +264,7 @@ describe("同步鎖與原子寫入（隔離 D1）", () => {
           )
           .bind(connector, connector, now, now),
       ]),
-    ]);
+    );
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date(current));
     let batchId: string | null = null;

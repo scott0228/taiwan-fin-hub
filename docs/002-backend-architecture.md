@@ -78,7 +78,7 @@ shared/
 └── activity/              # 活動配對、去重、排序與資料組裝的純邏輯
     ├── types.ts
     ├── list.ts
-    ├── flow.ts
+    ├── flow.ts            # 收支方向、台幣換算與分類加總（活動頁與 MCP 共用）
     ├── filter.ts
     ├── items.ts
     └── matching.ts
@@ -141,6 +141,18 @@ flowchart TD
 - 跨 feature 的 service 呼叫應保持明確，避免形成循環相依。
 - 不為了符合形式而建立空的 Service 或 Repository。
 - 不建立通用 `BaseRepository` 或過度抽象的資料存取層。
+
+可由 import 路徑判斷的邊界由根目錄 `.oxlintrc.json` 以 oxlint `no-restricted-imports` 檢查，並在 CI 執行 `npm run lint`：
+
+- `platform` 不引用 `features`。
+- feature 不引用其他 feature 的 `route.ts`。
+- `sources/<connectorId>/` 不引用其他來源目錄；`connector.ts` 不引用 DB、Drizzle、feature，或同一來源的 `sync.ts` 與 repository。
+- 來源的 `*protocol.ts`、`*client.ts` 不引用 Hono、Drizzle、Puppeteer、DB、`platform`（含 Worker `Env`）、feature、browser adapter，或同一來源的 `connector.ts`、`sync.ts` 與 repository。
+- 根目錄 `shared/` 不引用 Hono、Drizzle、`@cloudflare/*`、Zod 或 `apps/`。
+
+循環相依、repository 是否處理 Hono `Context` 等無法由 import 路徑判斷的約定仍靠 review。oxlint 遇到同一檔案符合多個 override 時，後者會取代前者的同名規則；新增較細的區塊須帶上外層限制。
+
+同一份設定也以 error 啟用 oxlint 的 `correctness` 類規則，並透過 `oxlint-tsgolint` 執行需要型別資訊的 type-aware 規則（例如 `no-floating-promises`）。型別資訊取自各檔案最近的 `tsconfig.json`，涵蓋 Worker、根目錄 `shared/` 與前端 `.ts`；`.svelte` 檔只套用不需型別資訊的規則。與既有刻意寫法衝突的 `no-control-regex`、`no-base-to-string`、`unbound-method` 已關閉；`no-floating-promises` 允許 `node:test` 的頂層 `test()`。個別刻意寫法以 `// oxlint-disable-next-line <rule> -- 原因` 標註，不放寬整條規則。
 
 ## Feature 內部結構
 
@@ -221,7 +233,7 @@ SQL 應放在使用它的 feature 附近。只有確實被多個 feature 共用�
 
 Cloudflare Worker 與 HTTP 平台層，目前包含：
 
-- Worker bindings 與 Hono binding types。兆豐 App API 的對外請求由 `MegabankEgress` 轉送，物件定義見 `platform/megabank-egress-object.ts`。台北富邦網銀的瀏覽器請求由 `FubonEgress` 代發（Browser Run 出口遭銀行重設連線），物件定義見 `platform/fubon-egress-object.ts`，CDP 攔截位於 `sources/fubon/egress.ts`。
+- Worker bindings 與 Hono binding types。兆豐 App API 的對外請求由 `MegabankEgress` 轉送，物件定義見 `platform/megabank-egress-object.ts`。台北富邦網銀的瀏覽器請求由 `FubonEgress` 代發（Browser Run 出口遭銀行重設連線），物件定義見 `platform/fubon-egress-object.ts`，CDP 攔截位於 `sources/fubon/egress.ts`。Binance 與 MAX 的 API 請求由 `CryptoBrowserEgress` 開 Browser Run 代發（交易所拒絕 Workers 的對外連線），物件定義見 `platform/crypto-browser-egress-object.ts`；物件的 HTTP 介面、Worker 端 fetcher 與區域備援在 `platform/crypto-browser-egress.ts`，開瀏覽器與同源頁面代發的瀏覽器端在 `sources/crypto-browser-egress.ts`。這個物件本身就是開 Browser Run 代發，所以 platform 這兩個檔案例外引用 `sources` 根目錄的共用瀏覽器工具（工作階段與 `BrowserRunCapacityError`），不引用任何具體來源。
 - Hono factory。
 - API error response。
 - Demo 唯讀模式。
@@ -256,7 +268,7 @@ Middleware 應只處理跨功能的 request concern，不應承擔 feature 商�
 
 實體目錄集中不改變相依邊界：`sync.ts` 可依賴 connector、protocol、client、repository 與明確的共用 service；protocol／client 不得依賴 Hono、D1、Worker `Env`、adapter 或同步流程，也不得直接寫入資料庫。來源之間不引用彼此的內部實作。
 
-`sources` 根目錄只保留跨來源使用的能力：`browser.ts` 管 browser acquisition、capacity 錯誤、登入前頁面停滯復原與有期限的 session 清理，`sync-error.ts` 定義來源錯誤宣告對外錯誤代碼的介面，`types.ts` 定義後端 `Connector`／`SyncResult`，`financial-types.ts` 定義 connector 正規化後的金融資料（`BankAccount`、`BankTransaction`、`CreditCardBill`、`Invoice` 等），`sync-window.ts`、`credit-card-status.ts`、`captcha-retry.ts`（API 型來源的自動驗證碼重試）與 `post-login-retry.ts`（登入後頁面步驟在同一工作階段內的重試）提供共同 policy／判斷。`config-registry.ts` 直接引用各來源的純 schema、設定頁 session 狀態判斷與身分欄位重設規則，供設定 feature 使用；`deposit-source-registry.ts` 依 `bank:<connectorId>:<帳號或末四碼>:...` 約定解析直接存款 sourceId（王道等格式例外引用來源 protocol），供銀行顯示、帳戶比對與集保交割帳戶連結使用，直接存款銀行代碼由共用 catalog 的 `bankCode` 宣告；同步 handler 仍由 `features/sync/registry.ts` 組裝。Worker 與測試直接引用來源檔案，不建立跨來源的實作匯出入口。
+`sources` 根目錄只保留跨來源使用的能力：`browser.ts` 管 browser acquisition、capacity 錯誤、登入前頁面停滯復原與有期限的 session 清理，`sync-error.ts` 定義來源錯誤宣告對外錯誤代碼的介面，`types.ts` 定義後端 `Connector`／`SyncResult`，`financial-types.ts` 定義 connector 正規化後的金融資料（`BankAccount`、`BankTransaction`、`CreditCardBill`、`Invoice` 等），`sync-window.ts`、`credit-card-status.ts`、`captcha-retry.ts`（API 型來源的自動驗證碼重試）與 `post-login-retry.ts`（登入後頁面步驟在同一工作階段內的重試）提供共同 policy／判斷。`crypto-holdings.ts`、`crypto-prices.ts` 是加密貨幣交易所共用的持倉正規化、HMAC 簽章與 MAX 公開報價，`crypto-browser-egress.ts` 是 Browser Run 代發的瀏覽器端工作階段。`config-registry.ts` 直接引用各來源的純 schema、設定頁 session 狀態判斷與身分欄位重設規則，供設定 feature 使用；`deposit-source-registry.ts` 依 `bank:<connectorId>:<帳號或末四碼>:...` 約定解析直接存款 sourceId（王道等格式例外引用來源 protocol），供銀行顯示、帳戶比對與集保交割帳戶連結使用，直接存款銀行代碼由共用 catalog 的 `bankCode` 宣告；同步 handler 仍由 `features/sync/registry.ts` 組裝。Worker 與測試直接引用來源檔案，不建立跨來源的實作匯出入口。
 
 Browser 登入前復原最多三次嘗試，只包住頁面與驗證碼準備；OCR、送出登入與資料查詢留在來源 adapter，政策細節見 `docs/004-connector-development.md`。
 
@@ -410,6 +422,30 @@ Request
 ```
 
 非 `/api` 路徑交由 `ASSETS` binding 提供前端靜態檔案。
+
+`/mcp` 是 MCP（Model Context Protocol）端點，掛在 Composition Root、不經過 `/api` 的 Demo 唯讀 middleware：
+
+```text
+Request
+  → Cloudflare Access middleware（與 /api 共用同一個 Access Application 與 JWT 驗證）
+  → features/mcp/route.ts（Demo 模式回 404、檢查 Origin）
+  → 無狀態 MCP handler（每個 request 建立新的 McpServer）
+```
+
+MCP 提供與網頁版相同的存取範圍：查詢工具整理回答所需的資料，其他讀取經 `query_api`（只送 GET、標示 `readOnlyHint`）、編輯與同步經 `call_api`（只接受 POST、PUT、PATCH、DELETE，標示 `destructiveHint`）走 `/api`；讀寫分成兩個工具，讓 AI 助理只在寫入時要求使用者確認。`features/mcp/route.ts` 的 `createMcpRoutes(api)` 由 Composition Root 傳入組裝好的 `/api` app，`features/mcp/api.ts` 在同一個 Worker 內以 `api.fetch` 呼叫，只轉送 Access 身分（`Cf-Access-Jwt-Assertion`、`Cookie`），由 `/api` 的 Access、Demo 唯讀與 Zod 驗證再次把關；不得在 MCP 另寫繞過 `/api` 的寫入工具。`list_api_endpoints` 由 `api.routes` 產生端點清單，說明文字維護於 `features/mcp/api.ts`，新增或修改 API 時同步更新；來源同步的 body 由 `sync/registry.ts` 的 schema 產生。Managed OAuth 設定與客戶端連線步驟見 [AI 助理連線（MCP）](006-mcp.md)。查詢工具的資料讀取放在 `features/mcp/service.ts`，沿用其他 feature 的 service 與 `shared/` 計算，不另寫查詢或金額邏輯：
+
+| 工具                       | 沿用的計算                                                                      |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| `get_financial_overview`   | `sync/reports` 的 `calculateCurrentFinancialSnapshot`，淨資產公式與總覽頁相同   |
+| `list_accounts`            | `bank` 的 `getBankAccounts` 與 `manual-assets`                                  |
+| `list_investment_holdings` | `investments` 的最新持倉                                                        |
+| `get_monthly_cash_flow`    | `activity` 的 `getActivityItemsInRange` 與 `shared/activity/flow.ts` 的收支加總 |
+| `search_activity`          | `activity` 的 `searchActivity`                                                  |
+| `get_upcoming_payments`    | `notifications` 的 `loadPaymentReminders`                                       |
+
+- `get_monthly_cash_flow` 前後各多讀一個月再以活動日期篩選，讓跨月的發票與刷卡配對結果與活動頁一致。
+- 回傳內容會送到使用者選用的 AI 服務：查詢工具的帳號只留末四碼，不回傳內部 ID、`raw_payload` 與來源設定；`query_api` 與 `call_api` 回傳與網頁版相同的 API 回應。活動的標題與說明和 App 畫面相同，銀行未提供摘要時可能是交易備註；這是搜尋與分類所需的內容，帳號遮蔽由各來源在正規化時負責。
+- 工具錯誤只回通用訊息，細節經 `sanitizeDatabaseError` 消毒後寫入 log；讀取失敗不得以空結果代替，避免 AI 誤判為「沒有資料」。
 
 ## Request 驗證
 
@@ -589,7 +625,8 @@ X-Next-Cursor: <opaque-cursor>
 
 - 只需帳戶與餘額的頁面使用 `GET /api/bank/accounts`，不載入交易、轉帳配對與分類。
 - 資料來源卡片的設定狀態沿用 `/api/sync-jobs` 的 `configured`；開啟連接器詳情時才讀取 `/api/connectors/:connectorId/settings`。
-- `GET /api/activity/invoice-mappings` 接受與其他區間 API 相同的 `from`／`to` 月份。發票與交易必須同一個台北日才能連結，因此頁面只讀取區間內發票的決定；未帶區間時回傳全部。
+- `GET /api/activity/invoice-mappings` 接受與其他區間 API 相同的 `from`／`to` 月份。連結的交易一定在發票當天或之後，跨日配對的活動以交易日期呈現，因此頁面只讀取區間內發票的決定；未帶區間時回傳全部。
+- 自動配對只在同一天；跨日配對一定是手動建立並存於 `invoice_transaction_preferences`。活動搜尋與 `getActivityItemsInRange` 依日期讀取後，以 `loadLinkedCounterparts` 依 linked 紀錄補讀不在本批的另一端，不以放寬日期範圍處理。補讀的資料只供配對；搜尋以發票命中時一併回傳其連結交易的日期，活動仍只在交易日期呈現一次。
 - 銀行交易分類時，分類規則與第一輪查詢並行，當頁交易的分類覆寫、轉帳候選與退費原消費候選並行；只有頁面外的候選需要再查一次覆寫。退費候選依信用卡帳戶走 `idx_bank_transactions_account_posted_date`，只在當頁有信用卡正數交易時查詢。
 - 各 connector／asset type 的最新持倉統一使用 `db/investment-positions.ts`，以一次 GROUP BY 取得最新日期，不逐列執行 MAX 子查詢。
 - Cloudflare Access 公鑰只在 isolate 記憶體快取；Access 後方的 Worker 無法使用 Cache API。同一 isolate 的並行請求共用同一次下載與匯入後的金鑰。
@@ -704,8 +741,9 @@ sources/
 | `card-authorization-matching.ts`                 | 依正規化的帳戶、卡片、消費日、幣別與正負金額，按穩定順序逐一配對授權與明細；不依賴 D1 或來源協定。                                                                                                                                                                                 |
 | `card-authorization-write.ts`                    | 共用配對保存、可靠時刻與分類／排除／發票移轉；合併歷史候選、排除既有關係，晚到的舊識別更新已建立的目標。                                                                                                                                                                           |
 | `transaction-merge.ts`、`card-reconciliation.ts` | 共用舊交易合併與單卡摘要帳戶修復；保留使用者偏好、分類與發票關聯。                                                                                                                                                                                                                 |
+| `crypto-holdings-write.ts`                       | 加密貨幣交易所的當天完整持倉快照：設定版本 guard、刪除同 connector 當天持倉、promotion 新列與淨資產歷史在同一 batch。                                                                                                                                                              |
 
-Worker 的 `sources/<connectorId>/sync.ts` 負責設定解密、connector 呼叫與同步資料寫入；單次銀行流程也處理互動式 challenge，override 型別與來源 colocate。`ctbc/authorizations.ts` 管信用卡授權合併，`hncb/repository.ts` 管華南舊交易／帳戶修復，`nextbank/deposits.ts` 與 `obank/time-deposits.ts` 管存款生命週期。共用同步管理留在 `features/sync`，來源之間共用的外部取資料工具留在 `sources` 根目錄。
+Worker 的 `sources/<connectorId>/sync.ts` 負責設定解密、connector 呼叫與同步資料寫入；單次銀行流程也處理互動式 challenge，override 型別與來源 colocate。`ctbc/authorizations.ts` 管信用卡授權合併，`hncb/repository.ts` 管華南舊交易／帳戶修復，`nextbank/deposits.ts` 與 `obank/time-deposits.ts` 管存款生命週期。共用同步管理留在 `features/sync`，來源之間共用的外部取資料工具留在 `sources` 根目錄（例如加密貨幣來源共用的 `crypto-holdings.ts` 正規化、`crypto-prices.ts` MAX 公開報價與 `crypto-browser-egress.ts` Browser Run 代發的瀏覽器端；Durable Object 介面在 `platform/crypto-browser-egress.ts`）。
 
 中信的固定裝置識別、銀行發出的裝置 seed 與短期兩階段登入暫存只保存於加密設定。
 `ctbc/sync.ts` 以設定版本 CAS 在初始化前保存裝置 ID、首次握手後登入前保存 seed；
@@ -758,6 +796,9 @@ API 驗證星期不可重複、至少一天，並按 0 至 6 排序；舊版單�
 `nextSyncRunAt` 從勾選星期找出嚴格晚於目前時間的最近執行時間，
 一般同步及電子發票／集保結案皆使用相同計算。更新預設排程只重算繼承來源；
 Cron、Queue 與預設批次的執行方式維持既有流程。
+繼承來源（`schedule_mode = inherit`）的頻率、時間與星期在 `syncJobSelection` 一律讀取
+`sync_schedule_settings`，工作列上保存的排程欄位只作為切回自訂排程的初始值；
+因此新 connector migration 使用欄位預設值建立 job、首次成功後自動啟用時，也不會偏離預設排程。
 
 同一個 connector 的不同同步 scope 共用 canonical connector lock，避免以下工作重疊：
 
@@ -1032,6 +1073,7 @@ Connector 回傳的 `raw` 資料只供診斷與未來 migration 使用，不得�
 
 ```bash
 npm run format:check
+npm run lint
 npm run typecheck
 npm run test:backend
 npm run test:unit

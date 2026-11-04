@@ -1,3 +1,4 @@
+import { loanAccountName } from "../loan-account-name";
 import { depositAccountName } from "../deposit-account-name";
 import type {
   BankAccount,
@@ -435,7 +436,7 @@ export function parseMegabankLoans(
     bankAccounts.push({
       sourceId,
       institutionName: "兆豐銀行",
-      accountName: `${loanType} 末四碼 ${last4(loanNo)}`,
+      accountName: loanAccountName(housing ? "housing" : "other", loanNo),
       accountType: "loan",
       loanCategory: housing ? "housing" : "other",
       ...(annualRatePct !== undefined
@@ -444,6 +445,7 @@ export function parseMegabankLoans(
       currency,
       raw: {
         last4: last4(loanNo),
+        productName: loanType,
         initialAmount,
         totalPeriods: totalPeriods > 0 ? totalPeriods : undefined,
         remainingPeriods,
@@ -520,7 +522,7 @@ function loanDateAt(value: unknown): string | undefined {
   const western = dateAt(value);
   if (western) return western;
   if (typeof value !== "string") return undefined;
-  const roc = /^(\d{3})[-\/]?(\d{2})[-\/]?(\d{2})$/.exec(value.trim());
+  const roc = /^(\d{3})[-/]?(\d{2})[-/]?(\d{2})$/.exec(value.trim());
   return roc
     ? dateAt(`${Number(roc[1]) + 1911}-${roc[2]}-${roc[3]}`)
     : undefined;
@@ -560,14 +562,14 @@ function currencyAt(value: unknown): string | undefined {
 }
 function dateAt(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const match = /^(\d{4})[-\/]?(\d{2})[-\/]?(\d{2})/.exec(value.trim());
+  const match = /^(\d{4})[-/]?(\d{2})[-/]?(\d{2})/.exec(value.trim());
   if (!match) return undefined;
   const date = `${match[1]}-${match[2]}-${match[3]}`;
   return Number.isNaN(Date.parse(date)) ? undefined : date;
 }
 function periodAt(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const match = /^(\d{4})[-\/]?(\d{2})/.exec(value.trim());
+  const match = /^(\d{4})[-/]?(\d{2})/.exec(value.trim());
   return match && Number(match[2]) >= 1 && Number(match[2]) <= 12
     ? `${match[1]}-${match[2]}`
     : undefined;

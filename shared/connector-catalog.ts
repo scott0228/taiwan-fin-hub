@@ -22,7 +22,9 @@ export type ConnectorCapability =
 export interface ConnectorCredentialField {
   key: string;
   label: string;
-  type: "text" | "password";
+  type: "text" | "password" | "select";
+  /** type 為 select 時必填；第一個選項為預設值，欄位未設定時視同第一個選項。 */
+  options?: readonly { value: string; label: string }[];
 }
 
 export interface ConnectorCatalogEntry {
@@ -249,6 +251,7 @@ export const connectorCatalog = {
       "bank_balance_snapshot",
       "bank_transaction",
       "credit_card_bill",
+      "loan",
     ],
     publicFields: [],
     credentialFields: [
@@ -488,6 +491,15 @@ export const connectorCatalog = {
     ],
     publicFields: [],
     credentialFields: [
+      {
+        key: "loginMode",
+        label: "登入方式",
+        type: "select",
+        options: [
+          { value: "general", label: "一般登入" },
+          { value: "card_member", label: "信用卡網路會員" },
+        ],
+      },
       { key: "userId", label: "身分證字號", type: "text" },
       { key: "account", label: "使用者代碼", type: "text" },
       { key: "password", label: "使用者密碼", type: "password" },
@@ -555,6 +567,65 @@ export const connectorCatalog = {
     ],
     secretStateFields: ["deviceUuid"],
     resetOnCredentialChangeFields: ["deviceUuid"],
+  },
+  binance: {
+    id: "binance",
+    title: "Binance",
+    bankCode: null,
+    connectionMode: "api_credentials",
+    scopes: ["all"],
+    capabilities: ["investment_position", "net_worth_history"],
+    publicFields: [],
+    credentialFields: [
+      {
+        key: "apiKey",
+        label: "API Key（僅開啟讀取權限）",
+        type: "text",
+      },
+      { key: "apiSecret", label: "Secret Key", type: "password" },
+    ],
+    secretStateFields: [],
+    resetOnCredentialChangeFields: [],
+  },
+  max: {
+    id: "max",
+    title: "MAX 交易所",
+    bankCode: null,
+    connectionMode: "api_credentials",
+    scopes: ["all"],
+    capabilities: ["investment_position", "net_worth_history"],
+    publicFields: [],
+    credentialFields: [
+      {
+        key: "accessKey",
+        label: "Access Key（僅開啟讀取權限）",
+        type: "text",
+      },
+      { key: "secretKey", label: "Secret Key", type: "password" },
+    ],
+    secretStateFields: [],
+    resetOnCredentialChangeFields: [],
+  },
+  chb: {
+    id: "chb",
+    title: "彰化銀行",
+    bankCode: "009",
+    connectionMode: "browser_captcha_session",
+    scopes: ["all"],
+    capabilities: ["bank_account", "bank_balance_snapshot", "bank_transaction"],
+    publicFields: [],
+    credentialFields: [
+      { key: "nationalId", label: "身分證字號", type: "text" },
+      { key: "userId", label: "使用者代號", type: "text" },
+      { key: "password", label: "密碼", type: "password" },
+    ],
+    secretStateFields: ["browserSessionId", "captcha"],
+    resetOnCredentialChangeFields: [
+      "browserSessionId",
+      "browserSessionExpiresAt",
+      "captchaDigitCount",
+      "captcha",
+    ],
   },
 } as const satisfies Record<string, ConnectorCatalogEntry>;
 

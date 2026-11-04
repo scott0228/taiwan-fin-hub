@@ -167,6 +167,10 @@ Cloudflare Access 預設可能使用 Email OTP。如要限定 Cloudflare 帳號�
 
 **Access controls → Access settings → Global session duration** 決定重新向 identity provider 驗證的頻率，可依需求調整。既有 Application token 在自己的期限內仍有效，並非一律採用 Global 與 Application 中較短的期限。詳見官方[Session management](https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/session-management/)。
 
+### 開放 AI 助理連線（MCP）
+
+要讓 Codex、ChatGPT 等 AI 助理透過 `/mcp` 查詢資料，需在保護此 Worker 的 Application 開啟 **Managed OAuth**。開啟後，未登入的非瀏覽器請求會收到 `401` 而非轉址；網頁版登入方式不變。完整設定與各助理的連線步驟見 [AI 助理連線（MCP）](006-mcp.md)。
+
 ## 自動更新
 
 Deploy to Cloudflare 建立的新 repository 不會包含本專案的 `.github/workflows`，需要一次性安裝更新 workflow。
@@ -247,6 +251,8 @@ npm run dev
 
 台北富邦網銀拒絕 Browser Run 的對外連線，網銀請求改由 `FubonEgress` Durable Object 代發（migration tag `v2`）。設定方式與 `MegabankEgress` 相同：根目錄 `wrangler.toml` 與 `apps/worker/wrangler.local.toml.example` 已包含 binding 與 SQLite migration，既有私人 `wrangler.local.toml` 需自行補上 `FUBON_EGRESS` binding 與 `v2` migration。
 
+Binance 與 MAX 的 API 請求由 `CryptoBrowserEgress` Durable Object 開 Browser Run 代發（migration tag `v3`），設定方式相同；既有私人 `wrangler.local.toml` 需自行補上 `CRYPTO_BROWSER_EGRESS` binding 與 `v3` migration。
+
 本機 `apps/worker/.dev.vars.example` 保留手動金鑰設定；請填入開發用隨機金鑰。若需解密正式資料，正式部署也必須在最初自行提供並保存相同金鑰；公開部署範例的 `auto` 只會由部署 script 初始化。
 
 SQL migrations 位於 `apps/worker/migrations/`。根目錄 `wrangler.toml` 的 `migrations_dir` 使用 `apps/worker/migrations`；`apps/worker/wrangler.local.toml` 使用相對於該設定檔的 `migrations`。若已建立私人 Wrangler 設定，請同步更新其 migration 路徑；既有 migration 檔名與內容維持原樣。
@@ -263,6 +269,7 @@ npm run db:migrate:remote
 ## Demo 模式
 
 設定 `DEMO_MODE=true` 會略過 Cloudflare Access 登入、只允許唯讀 API，並停止背景排程同步，適合用來公開展示介面。
+Demo 模式不開放 MCP 端點，`/mcp` 會回傳 `404`。
 
 Demo 模式下任何人都能讀取該 Worker 綁定的 D1 資料，因此必須部署為獨立的 Worker，並綁定只含展示資料的 staging／demo D1；不要在儲存真實帳戶資料或連接器設定的部署啟用此模式。
 

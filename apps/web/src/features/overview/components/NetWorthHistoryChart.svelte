@@ -26,6 +26,7 @@
     NET_WORTH_COMPARISON_PERIODS,
     NET_WORTH_ASSET_SERIES,
     NET_WORTH_DEFAULT_ASSETS,
+    restoreIncludedNetWorthAssets,
     type NetWorthAssetType,
     type NetWorthChartPoint,
     type NetWorthDisplayMode,
@@ -42,11 +43,13 @@
   const uid = $props.id();
   const gradientId = `net-worth-fill-${uid.replace(/:/g, "")}`;
   const storageKey = "taiwan-fin-hub-net-worth-chart-included-assets";
+  const knownStorageKey = "taiwan-fin-hub-net-worth-chart-known-assets";
   const timeframes: NetWorthTimeframe[] = ["1M", "3M", "6M", "1Y", "ALL"];
   const chartConfig: ChartConfig = {
     selectedTotal: { label: "淨資產", color: "#3e6f7c" },
     stock: { label: "股票/ETF", color: "#6574cd" },
     fund: { label: "基金", color: "#9b6bb0" },
+    crypto: { label: "加密貨幣", color: "#c0703a" },
     deposit: { label: "存款", color: "#3e6f7c" },
     manual: { label: "其他資產", color: "#b5853f" },
   };
@@ -61,6 +64,10 @@
   let comparisonPeriod = $state<NetWorthComparisonPeriod>("day");
 
   const availableAssets = $derived(getAvailableNetWorthAssets(data));
+  /** 沒有歷史資料的資產類型無法納入，直接不顯示篩選選項。 */
+  const assetOptions = $derived(
+    NET_WORTH_ASSET_SERIES.filter(({ key }) => availableAssets.has(key)),
+  );
   const chartData = $derived(
     buildNetWorthChartData(data, includedAssets, timeframe),
   );
@@ -112,12 +119,11 @@
 
   onMount(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(storageKey) ?? "null");
-      if (!Array.isArray(saved)) return;
-      const valid = saved.filter((value): value is NetWorthAssetType =>
-        ["stock", "fund", "deposit", "manual"].includes(value),
+      const restored = restoreIncludedNetWorthAssets(
+        JSON.parse(localStorage.getItem(storageKey) ?? "null"),
+        JSON.parse(localStorage.getItem(knownStorageKey) ?? "null"),
       );
-      if (valid.length) includedAssets = valid;
+      if (restored) includedAssets = restored;
     } catch {
       /* keep defaults */
     }
@@ -131,6 +137,10 @@
     if (next.length === 0) return;
     includedAssets = next;
     localStorage.setItem(storageKey, JSON.stringify(next));
+    localStorage.setItem(
+      knownStorageKey,
+      JSON.stringify(NET_WORTH_ASSET_SERIES.map(({ key }) => key)),
+    );
   }
 
   function xValue(point: NetWorthChartPoint) {
@@ -211,12 +221,10 @@
           aria-label="資產類型篩選"
         >
           <span class="text-caption font-medium text-subtle">包含</span>
-          {#each NET_WORTH_ASSET_SERIES as option (option.key)}
+          {#each assetOptions as option (option.key)}
             {@const active = includedAssets.includes(option.key)}
-            {@const available = availableAssets.has(option.key)}
             <button
-              class={`flex items-center gap-1.5 rounded-md px-2 py-2 text-caption font-medium transition ${active && available ? "bg-ink/5 text-ink" : "bg-transparent text-subtle"} ${available ? "hover:bg-ink/5 hover:text-steel" : "cursor-not-allowed opacity-40"}`}
-              disabled={!available}
+              class={`flex items-center gap-1.5 rounded-md px-2 py-2 text-caption font-medium transition hover:bg-ink/5 hover:text-steel ${active ? "bg-ink/5 text-ink" : "bg-transparent text-subtle"}`}
               aria-pressed={active}
               onclick={() => toggleAsset(option.key)}
               ><span

@@ -11,7 +11,7 @@
 - Tables：35
 - Explicit indexes：47
 - Other objects：0
-- Migrations：63
+- Migrations：67
 
 ## Tables
 
@@ -36,7 +36,7 @@
 | [`investment_transactions`](#investment_transactions) | 投資帳戶的買賣、配息或其他證券交易明細。 | 22 | 0 | 3 |
 | [`invoice_line_items`](#invoice_line_items) | 電子發票底下的商品或服務明細。 | 13 | 1 | 2 |
 | [`invoice_transaction_preferences`](#invoice_transaction_preferences) | 使用者對電子發票與銀行交易是否關聯的決策。 | 5 | 2 | 2 |
-| [`invoices`](#invoices) | 電子發票的抬頭與總額主檔。 | 10 | 0 | 2 |
+| [`invoices`](#invoices) | 電子發票的抬頭與總額主檔。 | 11 | 0 | 2 |
 | [`manual_assets`](#manual_assets) | 使用者手動登錄、無法由銀行或投資連接器同步的資產。 | 6 | 0 | 0 |
 | [`manual_sync_runs`](#manual_sync_runs) | 使用者按下同步後交由 Queue consumer 執行的背景手動同步，讓前端離開或重新整理不影響同步。 | 11 | 0 | 2 |
 | [`net_worth_history`](#net_worth_history) | 按日期保存的淨資產或資產類別歷史數值，用於圖表與歷史查詢。 | 6 | 0 | 2 |
@@ -863,9 +863,9 @@ CREATE TABLE "exchange_rates" (
 | 1 | `id` | 持倉快照的系統識別碼。 | TEXT | NO | — | 1 | — |
 | 2 | `connector_id` | 產生此持倉的外部連接器識別碼。 | TEXT | NO | — | — | — |
 | 3 | `source_id` | 外部來源系統提供的持倉識別碼。 | TEXT | NO | — | — | — |
-| 4 | `asset_type` | 資產類型，目前限制為 stock、etf 或 fund。 | TEXT | NO | — | — | — |
-| 5 | `symbol` | 證券、基金或 ETF 的代號。 | TEXT | YES | — | — | — |
-| 6 | `name` | 投資標的名稱。 | TEXT | NO | — | — | — |
+| 4 | `asset_type` | 資產類型，目前限制為 stock、etf、fund 或 crypto；crypto 為加密貨幣交易所持倉，市值為同步當下換算的台幣。 | TEXT | NO | — | — | — |
+| 5 | `symbol` | 證券、基金或 ETF 的代號；crypto 為大寫幣種代碼，合約權益與錢包總值為 NULL。 | TEXT | YES | — | — | — |
+| 6 | `name` | 投資標的名稱；crypto 的幣種列為交易所名稱，合約權益與錢包總值為帳戶名稱。 | TEXT | NO | — | — | — |
 | 7 | `quantity` | 持有數量。 | REAL | YES | — | — | — |
 | 8 | `market_value` | 持倉的市場價值。 | INTEGER | YES | — | — | — |
 | 9 | `cash_balance` | 此投資帳戶或資產項目中的現金餘額。 | INTEGER | YES | — | — | — |
@@ -895,7 +895,7 @@ CREATE TABLE "investment_positions" (
   id TEXT NOT NULL PRIMARY KEY,
   connector_id TEXT NOT NULL,
   source_id TEXT NOT NULL,
-  asset_type TEXT NOT NULL CHECK (asset_type IN ('stock', 'etf', 'fund')),
+  asset_type TEXT NOT NULL CHECK (asset_type IN ('stock', 'etf', 'fund', 'crypto')),
   symbol TEXT,
   name TEXT NOT NULL,
   quantity REAL,
@@ -1088,7 +1088,7 @@ CREATE TABLE "invoice_transaction_preferences" (
 ### `invoices`
 
 > 用途：電子發票的抬頭與總額主檔。
-> 注意：商品明細另存於 invoice_line_items；同一 connector 與 source_id 只保留一張發票。
+> 注意：商品明細另存於 invoice_line_items；同一 connector 與 source_id 只保留一張發票。excluded_from_calculation 是使用者設定，同步 upsert 只更新來源欄位，不得覆寫此欄位；變更此欄位也不更新 updated_at。
 
 #### Columns
 
@@ -1104,6 +1104,7 @@ CREATE TABLE "invoice_transaction_preferences" (
 | 8 | `raw_payload` | 連接器回傳的原始或正規化 JSON。 | TEXT | YES | — | — | — |
 | 9 | `created_at` | 發票首次寫入的時間。 | TEXT | NO | — | — | — |
 | 10 | `updated_at` | 發票最後更新的時間。 | TEXT | NO | — | — | — |
+| 11 | `excluded_from_calculation` | 未配對到銀行或信用卡交易時，是否將此純發票活動排除於收支計算；0 表示納入（預設）、1 表示排除。現金消費的發票在提款時已計入支出，可逐筆排除以免重複計算；配對交易後改以交易的計算偏好為準。 | INTEGER | NO | 0 | — | — |
 
 #### Foreign keys
 
@@ -1129,7 +1130,8 @@ CREATE TABLE "invoices" (
   amount INTEGER NOT NULL,
   raw_payload TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL, excluded_from_calculation INTEGER NOT NULL DEFAULT 0
+  CHECK (excluded_from_calculation IN (0, 1)),
   UNIQUE (connector_id, source_id)
 )
 ```
@@ -1234,7 +1236,7 @@ CREATE TABLE manual_sync_runs (
 | 1 | `id` | 歷史點的系統識別碼。 | TEXT | NO | — | 1 | — |
 | 2 | `date` | 此數值所代表的日期。 | TEXT | NO | — | — | — |
 | 3 | `net_worth` | 該日期與資產類型的金額；手動資產保留其設定幣別，其餘讀模型通常以 TWD 表示。 | INTEGER | NO | — | — | — |
-| 4 | `asset_type` | 資產類型，例如 total、deposit、stock、fund 或手動資產 id。 | TEXT | NO | 'total' | — | — |
+| 4 | `asset_type` | 資產類型，例如 total、deposit、stock、fund、crypto 或手動資產 id。 | TEXT | NO | 'total' | — | — |
 | 5 | `source` | 數值來源，例如 bank 或 manual。 | TEXT | NO | — | — | — |
 | 6 | `snapshotted_at` | 此歷史點實際建立或重算的時間。 | TEXT | NO | — | — | — |
 
@@ -1915,6 +1917,10 @@ Migration 是 schema 演進的 source of truth；若要了解某欄位的變更�
 - [`0063_payment_due_notification.sql`](../apps/worker/migrations/0063_payment_due_notification.sql)
 - [`0064_payment_accounts.sql`](../apps/worker/migrations/0064_payment_accounts.sql)
 - [`0065_ubot_sync_job.sql`](../apps/worker/migrations/0065_ubot_sync_job.sql)
+- [`0066_crypto_asset_type.sql`](../apps/worker/migrations/0066_crypto_asset_type.sql)
+- [`0067_binance_max_sync_jobs.sql`](../apps/worker/migrations/0067_binance_max_sync_jobs.sql)
+- [`0068_invoice_calculation_exclusion.sql`](../apps/worker/migrations/0068_invoice_calculation_exclusion.sql)
+- [`0069_chb_sync_job.sql`](../apps/worker/migrations/0069_chb_sync_job.sql)
 
 ## 程式碼導覽
 

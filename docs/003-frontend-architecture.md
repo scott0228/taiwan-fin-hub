@@ -25,6 +25,8 @@ apps/web/src/
 - 前後端都使用且穩定的 API contract 應逐步移到根目錄的 `shared/`；只用於前端組合畫面的 view model 可留在 `apps/web/src/data`。
 - 根目錄的 `shared/` 是唯一跨前後端共用的 workspace 套件；資料庫與連接器由 `apps/worker` 管理，前端不得引用 Worker 內部模組。
 
+其中 `data`、`shared` 不引用 `features`，以及前端不引用 Worker 內部模組，由根目錄 `.oxlintrc.json` 以 oxlint 檢查（`npm run lint`，涵蓋 `.svelte` 的 `<script>` 與動態 `import()`）；feature 之間的內部元件引用仍靠 review。
+
 銀行與信用卡帳單 API 的 response 契約定義於 `shared/api/bank.ts`，前端 `data/bank/types.ts` 僅提供既有名稱的 type re-export。Worker 在銀行 route 的 JSON 回傳處以 `satisfies` 檢查相同契約；欄位保留現有回應的 `null` 與帳單數值 flag，不將 connector 正規化資料或 ORM row 當作 API response 型別。資料來源 ID 保持現有回應的 string，catalog 的 `ConnectorId` 用於已驗證的 connector 註冊與操作。
 
 同步排程、連接器設定狀態與分類規則的 response 契約分別定義於 `shared/api/` 的 `sync.ts`、`connectors.ts` 與 `classification.ts`，`data/connectors/types.ts` 與 `data/classification/types.ts` 同樣以既有名稱 re-export；發票配對偏好 `InvoiceTransactionPreference` 由 `data/invoices/types.ts` re-export。
@@ -76,7 +78,7 @@ Commit 顯示前七碼，複製內容包含來源專案、完整上游 SHA 與�
 各組維持 catalog 順序；分組規則集中在 `features/settings/model/sources.ts`。
 來源的副標題是由 catalog `capabilities` 產生的支援範圍標籤（例如「存款・信用卡・貸款」），不另維護手寫說明；
 交易明細、餘額快照與淨值歷史為共有資料，不列標籤。
-尚未設定的來源只出現在「新增資料來源」選擇器（`AddSourceDialog`），依發票與投資、銀行分組並可搜尋；
+尚未設定的來源只出現在「新增資料來源」選擇器（`AddSourceDialog`），依發票與證券、銀行、加密貨幣分組並可搜尋；
 選擇後沿用 `ConnectorPanel` 的設定流程，首次儲存設定後才移入已連接清單。
 桌面版為左側清單、右側詳情；手機版點選來源後以詳情取代清單，並提供返回清單的按鈕。
 設定總覽與手機「更多」頁不列出全部來源，只顯示需要處理的來源與已連接數量。
@@ -97,7 +99,10 @@ npm run verify:web
 
 ## 活動時間顯示
 
-已配對發票的信用卡與銀行活動一律優先使用發票含時區的時間；發票沒有時刻時，沿用原交易時間。
+已配對發票的信用卡與銀行活動，在發票與交易同一天（台北日期）時優先使用發票含時區的時間；
+發票沒有時刻時，沿用原交易時間。手動配對可選發票日當天的台幣支出，或 45 天內金額相同的台幣支出
+（金融卡等可能延後扣款）；已配對其他發票的交易不列入候選。跨日配對的活動沿用交易日期，
+使月份統計與銀行帳務及總覽一致。
 此規則由共用活動資料組裝套用於列表、詳情與搜尋排序，解除配對後恢復銀行日期。
 只提供日期的發票不補時刻，也不回寫銀行原始交易資料。
 
@@ -115,6 +120,11 @@ npm run verify:web
 提示尚未包含的幣別並提供重試。零金額不需匯率即可計為 0，也不觸發缺少匯率提示。
 隱藏金額同時遮蔽台幣與原幣。
 
+未配對到銀行或信用卡交易的純發票活動，與銀行交易一樣可在明細勾選「排除統計計算」，
+供現金消費等已在提款時計入支出的發票避免重複計算。設定存於 `invoices.excluded_from_calculation`，
+由 `PATCH /api/invoices/:invoiceId/calculation` 直接切換，不經分類與規則確認；
+月份總額、分類圖表、現金流趨勢與總覽收支都略過已排除的純發票。發票配對到交易後改以交易的計算設定為準。
+
 後端標記 `refund` 的信用卡退費屬於支出側：月份總額、分類圖表與現金流趨勢都從該分類支出扣除，
 不計入收入；活動篩選選「支出」時也會列出。分類圖表只畫淨支出為正的分類，
 若某分類當月只有退費（例如上月消費、本月退款），不畫扇形但仍扣減月份總額，因此圖表總額由頁面傳入淨額，不以扇形加總。
@@ -126,6 +136,24 @@ npm run verify:web
 
 總覽與資產清冊的缺少匯率提示依原始金額判斷，只有實際為 0 才略過。
 外幣金額顯示保留原始小數，換算與總額計算也保留原始精度。
+
+## 投資與加密貨幣持倉
+
+加密貨幣（`assetType` 為 `crypto`，以 `isCryptoPosition` 判斷）與集保等證券投資是兩個獨立大類：
+總覽資產配置、資產頁上方摘要與資產清冊都分成「投資」與「加密貨幣」，與淨資產走勢一致；沒有加密貨幣持倉時不顯示加密貨幣。
+總資產與淨資產仍包含兩者。
+
+持倉清單使用 `features/assets/components/InvestmentHoldings.svelte`，排序與分組規則在
+`data/investments/holding-groups.ts`（含 colocated 測試，總覽頁也共用持倉筆數）。「投資」面板不分組，
+所有證券持倉平鋪成單一清單；「加密貨幣」面板依 `connectorId` 分交易所，交易所依台幣小計由大到小排列，
+各區段標題顯示交易所名稱與小計，一律展開。類型（STOCK、ETF、FUND、加密貨幣幣種、Binance 合約）放在每筆的副標。
+持倉依換算後的台幣市值由大到小排序，沒有市值的持倉顯示「無法估值」，缺少匯率的持倉顯示原幣金額，兩者都不計入小計並排在最後；台幣估值絕對值低於
+NT$10（`INVESTMENT_DUST_THRESHOLD_TWD`，與後端加密貨幣同步共用）的持倉不列出，但計入小計並提示筆數。加密貨幣「無持倉」零值列（`sourceId` 為 `shared/investments.ts` 的 `EMPTY_INVESTMENT_SOURCE_ID`）不列出，
+交易所顯示「目前沒有持倉」；只有零值列時仍顯示加密貨幣大類。總覽與資產頁的持倉筆數都以 `listedHoldingCount` 計算，只算實際列出的持倉。小計為負（例如 MAX 借款大於資產）時以警示色顯示。
+
+交易紀錄只有集保 e 存摺提供，只出現在「投資」面板；證券持倉都賣出但仍有交易紀錄時，仍顯示「投資」入口。「加密貨幣」面板只有持倉。
+
+`/api/investments` 每頁最多 100 筆，`investmentsQuery` 以 `ApiClient.getAllPages` 依 `X-Has-More`／`X-Next-Cursor` 取完所有頁，避免持倉超過一頁時少算市值。
 
 ## 匯率設定
 

@@ -1,3 +1,4 @@
+import { loanAccountName } from "../loan-account-name";
 import { depositAccountName } from "../deposit-account-name";
 import type { SourceSyncError, SourceSyncErrorSource } from "../sync-error";
 import type { SyncResult } from "../types";
@@ -2096,7 +2097,7 @@ export function parseCathayCardOverview(text: string) {
   const limitMatch = text.match(/永久信用額度\s*(?:TWD\s*)?([\d,]+)/);
   const availMatch = text.match(/剩餘可用額度[\s\S]{0,20}?(?:TWD\s*)?([\d,]+)/);
   const dueDateMatch = text.match(
-    /繳款截止日[\s\S]{0,10}?(\d{4}[\/\-]\d{2}[\/\-]\d{2})/,
+    /繳款截止日[\s\S]{0,10}?(\d{4}[/-]\d{2}[/-]\d{2})/,
   );
   const noPaymentNeeded = text.includes("無需繳費");
   // The current overview shows the latest statement as "臺幣帳單 TWD 12,345"
@@ -2620,12 +2621,7 @@ export async function scrapeLoans(page: Page): Promise<LoanScraped> {
       bankAccounts.push({
         sourceId,
         institutionName: "國泰世華銀行",
-        accountName:
-          loan.loanCategory === "housing"
-            ? "房屋貸款"
-            : loan.loanCategory === "other"
-              ? "其他貸款"
-              : "國泰世華貸款",
+        accountName: loanAccountName(loan.loanCategory, loan.accountNumber),
         accountType: "loan",
         ...(loan.loanCategory ? { loanCategory: loan.loanCategory } : {}),
         ...(loan.interestRate !== undefined

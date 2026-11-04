@@ -6,6 +6,7 @@
     createInfiniteQuery,
     createQuery,
     useQueryClient,
+    type InfiniteData,
   } from "@tanstack/svelte-query";
   import {
     Search,
@@ -25,9 +26,13 @@
   import Select from "@/shared/ui/Select.svelte";
   import TabsList from "@/shared/ui/TabsList.svelte";
   import TabsTrigger from "@/shared/ui/TabsTrigger.svelte";
-  import { activitySearchQuery } from "@/data/activity/queries";
+  import {
+    activitySearchQuery,
+    type ActivitySearchPage,
+  } from "@/data/activity/queries";
   import ActivitySearchFilters from "./components/ActivitySearchFilters.svelte";
   import SearchHighlight from "./components/SearchHighlight.svelte";
+  import CategoryBadge from "./components/CategoryBadge.svelte";
   import ActivityAmount from "./components/ActivityAmount.svelte";
   import ActivityCategoryChart from "./components/ActivityCategoryChart.svelte";
   import CalculationUpdateDialog from "./components/CalculationUpdateDialog.svelte";
@@ -79,7 +84,9 @@
   import {
     deduplicateBankTransactions,
     invoiceTransactionCandidates,
+    invoiceTransactionDayGap,
     matchInvoicesToTransactions,
+    MANUAL_INVOICE_MATCH_MAX_DAYS,
   } from "@/data/activity/matching";
   import { getActivityDataStatus } from "./model/load-status";
   import { createCategorySheet } from "./model/category-sheet.svelte";
@@ -92,7 +99,6 @@
     rateMap,
   } from "@/shared/format/financial";
   import { recentMonthRange, recentMonthKeys } from "@/shared/date-range";
-  import { swipeBack } from "@/shared/actions/swipe-back";
   let { api }: { api: ApiClient } = $props();
   const initialSelectedMonth = currentActivityMonthKey();
   // Keep API ranges and month options anchored to the same Taipei month key.
@@ -646,6 +652,49 @@
       qc.invalidateQueries({ queryKey: queryKeys.classificationRules });
     },
   }));
+  const invoiceCalculationMutation = createMutation(() => ({
+    mutationFn: (payload: {
+      invoiceId: string;
+      excludedFromCalculation: boolean;
+    }) =>
+      api.patch(
+        `/api/invoices/${encodeURIComponent(payload.invoiceId)}/calculation`,
+        { excludedFromCalculation: payload.excludedFromCalculation },
+      ),
+    onSuccess: (_result, payload) => {
+      const excludedFromCalculation = payload.excludedFromCalculation;
+      const markInvoice = <T extends { id: string }>(invoice: T) =>
+        invoice.id === payload.invoiceId
+          ? { ...invoice, excludedFromCalculation }
+          : invoice;
+      qc.setQueriesData<InvoiceSummaryRow[]>(
+        { queryKey: queryKeys.invoices },
+        (current) =>
+          Array.isArray(current) ? current.map(markInvoice) : current,
+      );
+      // 搜尋時明細讀的是搜尋快取；先同步，避免重新載入前或失敗時再送出相同設定。
+      // 只改純發票活動，已配對的交易沿用交易自己的計算設定。
+      qc.setQueriesData<InfiniteData<ActivitySearchPage>>(
+        { queryKey: ["bank", "activity-search"] },
+        (current) =>
+          current && {
+            ...current,
+            pages: current.pages.map((page) => ({
+              ...page,
+              items: page.items.map((item) =>
+                item.source === "invoice" &&
+                item.invoiceId === payload.invoiceId
+                  ? { ...item, excludedFromCalculation }
+                  : item,
+              ),
+              invoices: page.invoices.map(markInvoice),
+            })),
+          },
+      );
+      qc.invalidateQueries({ queryKey: queryKeys.invoices });
+      qc.invalidateQueries({ queryKey: ["bank", "activity-search"] });
+    },
+  }));
   const mappingMutation = createMutation(() => ({
     mutationFn: (payload: { invoiceId: string; transactionId: string }) =>
       api.put<InvoiceTransactionPreference>(
@@ -729,6 +778,8 @@
   }
   function openDetail(item: ActivityItem) {
     detailKey = activityKey(item);
+    // 明細有自己的 history entry，返回鍵與 iOS 主畫面 App 的系統右滑都會經 popstate 關閉；
+    // 不要再加自訂右滑，否則兩種手勢會同時拖動畫面。
     window.history.pushState(
       { ...window.history.state, activityDetail: detailKey },
       "",
@@ -740,6 +791,14 @@
     );
   }
   function toggleCalculation(item: ActivityItem) {
+    if (item.source === "invoice" && item.invoiceId) {
+      // 純發票沒有分類與規則可調整，直接切換是否計入。
+      invoiceCalculationMutation.mutate({
+        invoiceId: item.invoiceId,
+        excludedFromCalculation: !item.excludedFromCalculation,
+      });
+      return;
+    }
     if (!item.transactionId) return;
     if (!item.excludedFromCalculation) {
       pendingCalculation = {
@@ -1221,20 +1280,20 @@
                           />
                         </p>
                       {/if}
-                      {#if time}<p
-                          class="mt-0.5 text-xs font-medium tabular-nums text-subtle"
+                      {#if time || item.category}<div
+                          class="mt-1 flex items-center gap-2 text-xs font-medium tabular-nums text-subtle"
                         >
-                          {time}
-                        </p>{/if}
-                      <p
-                        class="mt-0.5 truncate text-caption font-medium text-subtle"
-                      >
-                        {item.institutionName ?? sourceLabel(item)}
-                      </p>
-                      <p class="mt-0.5 truncate text-xs text-subtle">
-                        {[item.accountName, item.category]
-                          .filter(Boolean)
-                          .join(" · ")}
+                          {#if time}<span class="shrink-0">{time}</span>{/if}
+                          {#if item.category}<CategoryBadge
+                              label={item.category}
+                              categoryId={item.categoryId}
+                              class="py-0 pr-2 font-medium"
+                            />{/if}
+                        </div>{/if}
+                      <p class="mt-1 truncate text-xs text-subtle">
+                        <span class="font-medium"
+                          >{item.institutionName ?? sourceLabel(item)}</span
+                        >{item.accountName ? ` · ${item.accountName}` : ""}
                       </p>
                     </div>
                     <div class="flex shrink-0 items-center gap-1.5">
@@ -1358,7 +1417,10 @@
                             {item.accountName}
                           </p>{/if}</td
                       ><td class="px-4 py-3.5"
-                        ><Badge variant="secondary">{item.category}</Badge></td
+                        ><CategoryBadge
+                          label={item.category}
+                          categoryId={item.categoryId}
+                        /></td
                       ><td class="py-3.5 pl-4"
                         ><div class="flex items-center justify-end gap-2">
                           <div class="min-w-0 text-right">
@@ -1435,11 +1497,6 @@
           aria-modal="true"
           class="relative flex h-full w-full flex-col overflow-hidden bg-card shadow-2xl md:max-w-[32rem]"
           role="dialog"
-          use:swipeBack={{
-            enabled:
-              document.documentElement.classList.contains("is-standalone"),
-            onBack: closeDetail,
-          }}
         >
           <header
             class="flex shrink-0 items-center justify-between border-b border-ink/10 px-4 py-3 md:px-6"
@@ -1491,9 +1548,11 @@
                   />
                 </p>
               </div>
-              <Badge variant="secondary" class="mt-3"
-                >{detailItem.category}</Badge
-              >
+              <CategoryBadge
+                label={detailItem.category}
+                categoryId={detailItem.categoryId}
+                class="mt-3"
+              />
               {#if detailItem.excludedFromCalculation}<Badge
                   variant="secondary"
                   class="ml-2 mt-3">已排除計算</Badge
@@ -1630,18 +1689,21 @@
                       >{#each categoryOptions as category (category.id)}<option
                           value={category.id}>{category.label}</option
                         >{/each}</Select
-                    >{:else}<Badge variant="secondary"
-                      >{detailItem.category}</Badge
-                    >{/if}
+                    >{:else}<CategoryBadge
+                      label={detailItem.category}
+                      categoryId={detailItem.categoryId}
+                    />{/if}
                 </div>
 
-                {#if detailItem.transactionId}<label
+                {#if detailItem.transactionId || detailItem.source === "invoice"}<label
                     class="flex cursor-pointer items-center justify-between gap-4 py-4"
                   >
                     <span>
                       <span class="block font-semibold">排除統計計算</span>
                       <span class="mt-1 block text-caption text-subtle"
-                        >保留活動，但不計入收支</span
+                        >{detailItem.source === "invoice"
+                          ? "現金消費已在提款時計入，可排除以免重複"
+                          : "保留活動，但不計入收支"}</span
                       >
                     </span>
                     <Checkbox
@@ -1650,7 +1712,10 @@
                       disabled={(calculationMutation.isPending &&
                         calculationMutation.variables?.transactionId ===
                           detailItem.transactionId) ||
-                        calculationUpdateMutation.isPending}
+                        calculationUpdateMutation.isPending ||
+                        (invoiceCalculationMutation.isPending &&
+                          invoiceCalculationMutation.variables?.invoiceId ===
+                            detailItem.invoiceId)}
                       onchange={(event: Event) =>
                         handleCalculationChange(detailItem, event)}
                     />
@@ -1720,7 +1785,7 @@
                   ? "管理配對"
                   : mappingDialog.step === "confirm"
                     ? "確認合併這兩筆？"
-                    : "選擇同日候選交易"}
+                    : "選擇候選交易"}
               </h2>
               {#if mappingDialog.step === "candidates"}<p
                   class="mt-1 truncate text-sm text-subtle"
@@ -1791,15 +1856,19 @@
               {#if mappingCandidates.length === 0}<div
                   class="rounded-xl border border-dashed border-ink/15 bg-paper p-6 text-center"
                 >
-                  <p class="font-semibold">同一天沒有可配對的支出</p>
+                  <p class="font-semibold">沒有可配對的支出</p>
                   <p class="mt-1 text-caption text-subtle">
-                    只有同一天的 TWD 銀行或信用卡支出會列在這裡。
+                    只列出發票日當天，或 {MANUAL_INVOICE_MATCH_MAX_DAYS} 天內金額相同、尚未配對的
+                    TWD 銀行或信用卡支出。
                   </p>
                 </div>{:else}{#each mappingCandidates as transaction (transaction.id)}{@const difference =
                     mappingDifference(
                       mappingDialog.invoice,
                       transaction,
-                    )}<button
+                    )}{@const dayGap = invoiceTransactionDayGap(
+                    transaction,
+                    mappingDialog.invoice,
+                  )}<button
                     aria-pressed={mappingDialog.transactionId ===
                       transaction.id}
                     class={`min-h-24 rounded-xl border p-4 text-left transition ${mappingDialog.transactionId === transaction.id ? "border-steel bg-steel/10 ring-2 ring-steel/15" : "border-ink/10 hover:border-steel/40 hover:bg-paper"}`}
@@ -1825,7 +1894,7 @@
                     </span>
                     <span class="mt-3 flex flex-wrap items-center gap-2">
                       <Badge variant="secondary" class="bg-moss/10 text-moss"
-                        >同一天</Badge
+                        >{dayGap ? `晚 ${dayGap} 天` : "同一天"}</Badge
                       >
                       {#if difference > 0}<Badge
                           variant="secondary"
@@ -1836,7 +1905,7 @@
                   </button>{/each}{/if}
             </div>
             <p class="mt-4 text-caption text-subtle">
-              依同一天與金額接近排序；商家名稱可能因支付工具而不同，最後由你決定。
+              依日期與金額接近排序；商家名稱可能因支付工具而不同，最後由你決定。
             </p>
             <div class="mt-5 grid grid-cols-[7rem_1fr] gap-3">
               <Button

@@ -2,7 +2,9 @@ import {
   findInvoice,
   listInvoiceItems,
   listInvoices,
+  listInvoicesByIds,
   listInvoicesInRange,
+  updateInvoiceCalculationExclusion,
   type InvoicePageCursor,
   type InvoiceRow,
 } from "./repository";
@@ -34,6 +36,12 @@ export async function getInvoicesRange(
   return rows.map(presentInvoiceSummary);
 }
 
+export async function getInvoicesByIds(db: D1Database, ids: string[]) {
+  if (ids.length === 0) return [];
+  const rows = await listInvoicesByIds(db, ids);
+  return rows.map(presentInvoiceSummary);
+}
+
 export async function getInvoiceDetail(db: D1Database, invoiceId: string) {
   const invoice = await findInvoice(db, invoiceId);
   if (!invoice) throw new InvoiceNotFoundError();
@@ -42,6 +50,21 @@ export async function getInvoiceDetail(db: D1Database, invoiceId: string) {
     invoice,
     items.map(({ invoiceId: _invoiceId, ...item }) => item),
   );
+}
+
+export async function setInvoiceCalculationPreference(
+  db: D1Database,
+  invoiceId: string,
+  excludedFromCalculation: boolean,
+) {
+  if (
+    !(await updateInvoiceCalculationExclusion(
+      db,
+      invoiceId,
+      excludedFromCalculation,
+    ))
+  )
+    throw new InvoiceNotFoundError();
 }
 
 function presentInvoice<T extends Omit<InvoiceRow, "updatedAt"> | InvoiceRow>(

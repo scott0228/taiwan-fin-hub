@@ -1,5 +1,6 @@
 export * from "./connector-catalog";
 export * from "./exchange-rates";
+export * from "./investments";
 export * from "./api/errors";
 export * from "./api/bank";
 export * from "./api/classification";
@@ -18,6 +19,9 @@ export {
   deduplicateBankTransactions,
   matchInvoicesToTransactions,
   invoiceTransactionCandidates,
+  invoiceTransactionDayGap,
+  isManualInvoiceMatchCandidate,
+  MANUAL_INVOICE_MATCH_MAX_DAYS,
   type InvoiceTransactionMatches,
   type InvoiceTransactionPreference,
 } from "./activity/matching";

@@ -40,6 +40,7 @@
 - `docs/002-backend-architecture.md`：後端分層、相依方向與維護約定的詳細文件。
 - `docs/003-frontend-architecture.md`：前端分層、相依方向與測試 colocate 約定。
 - `docs/004-connector-development.md`：Connector catalog、連接模式、敏感狀態與新增流程規範。
+- `docs/006-mcp.md`：MCP 工具、Cloudflare Access Managed OAuth 設定、AI 助理連線與疑難排解。
 
 ## 架構約定
 
@@ -48,6 +49,7 @@
 - HTTP concerns 放在 `route.ts`，use case 與商業流程放在 `service.ts`，feature 專用資料存取放在 `repository.ts`；一般 CRUD 預設使用 Drizzle。
 - 共用 API contract 放在根目錄的 `shared/`，不得混入 Hono `Context`、D1 row 或 Puppeteer object。
 - 前端採 feature-first 結構；`features` 可依賴 `data` 與 `shared`，`data`、`shared` 不得反向依賴 feature。
+- 前後端可由 import 路徑判斷的相依邊界，由根目錄 `.oxlintrc.json` 的 oxlint `no-restricted-imports` 檢查；相依約定改變時同步更新規則。
 - 前端金融計算測試與實作 colocate；主要操作流程的 Playwright tests 放在 `apps/web/e2e`。
 - 自動測試只保留金融數字、資料完整性、憑證／授權與主要操作流程四類核心保障；優先擴充既有案例，不要求每個功能、函式或分層都有測試，也不維護獨立 self-check。詳細原則見後端文件的「測試與驗證」。
 - 修改前依下方「文件閱讀與維護」對照表閱讀相關文件。
@@ -56,6 +58,7 @@
 
 - 全部格式化：`npm run format`
 - 全部格式檢查：`npm run format:check`
+- Lint（oxlint correctness、type-aware 與架構相依）：`npm run lint`
 - 全部型別檢查：`npm run typecheck`
 - 前端驗證：`npm run verify:web`
 - 後端測試：`npm run test:backend`
@@ -65,9 +68,9 @@
 
 每次 commit 或開／更新 PR 前，必須從 **repo root** 跑與 CI 相同的檢查，不得省略。
 
-- 先跑 `npm run format:check`，再跑 `npm run typecheck`，然後跑此次變更適用的 `npm run test:backend` 或前端 unit tests。
+- 先跑 `npm run format:check`，再跑 `npm run lint` 與 `npm run typecheck`，然後跑此次變更適用的 `npm run test:backend` 或前端 unit tests。
 - **禁止**用 `prettier --check <touched files>` 代替 `npm run format:check`。只對改動檔跑 Prettier 通過，不算完成。
-- CI（`.github/workflows/ci.yml`）順序為 `format:check` → `typecheck` → `test:backend` → `test:unit` → `build`。在本地通過前三項中適用的檢查之前，不得視為 commit 完成。
+- CI（`.github/workflows/ci.yml`）順序為 `format:check` → `lint` → `typecheck` → `test:backend` → `test:unit` → `build`。在本地通過前四項中適用的檢查之前，不得視為 commit 完成。
 
 ## 文件閱讀與維護
 
@@ -79,6 +82,7 @@
 | 前端結構、資料查詢、共用元件            | `docs/003-frontend-architecture.md`                             |
 | 連接器、登入、驗證碼、資料正規化        | `docs/004-connector-development.md`；涉及同步流程時也讀後端架構 |
 | 部署、自動更新、環境變數                | `docs/005-deployment.md`、`README.md` 對應章節                  |
+| MCP 工具、AI 助理連線                   | `docs/006-mcp.md`；工具實作約定見後端架構                       |
 | 資料庫 schema                           | `docs/database-schema.md`、相關 `apps/worker/migrations/*.sql`  |
 | Drizzle schema、client、repository 轉換 | `docs/002-backend-architecture.md`                              |
 | 使用方式、支援資料來源、限制            | `README.md` 對應章節                                            |

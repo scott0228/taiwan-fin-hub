@@ -1,13 +1,16 @@
 import type { ActivityItem } from "./types";
 
 import {
-  activityDisplayAmount,
-  activityCashFlow,
+  activityCategoryTotalsTwd,
   type ActivityFlow,
 } from "@taiwan-fin-hub/shared";
 export {
   activityDisplayAmount,
   activityCashFlow,
+  activityAmountTwd,
+  activityCashAmountTwd,
+  activityFlowAmountTwd,
+  activityFlowTotalTwd,
   type ActivityFlow,
 } from "@taiwan-fin-hub/shared";
 
@@ -18,70 +21,52 @@ export interface ActivityCategorySlice {
   color: string;
 }
 
-export const ACTIVITY_CATEGORY_COLORS = [
-  "#3e6f7c",
-  "#687f42",
+// 每個分類固定一個顏色，讓圖表、列表與詳情在不同月份與收支別都一致。
+// 少用的分類共用相近分類的顏色；未分類固定為淺灰。
+const ACTIVITY_CATEGORY_COLOR_BY_ID: Record<string, string> = {
+  food: "#b75b45",
+  shopping: "#a45c78",
+  transport: "#3e6f7c",
+  utilities: "#c7922b",
+  software: "#4a64a0",
+  housing: "#8c6844",
+  health: "#388d82",
+  entertainment: "#7665a8",
+  investment: "#2f6b4f",
+  salary: "#687f42",
+  reward: "#d07a3a",
+  transfer: "#68747b",
+  fee: "#a08a5a",
+  other: "#b0aca3",
+  "other-income": "#3e6f7c",
+  education: "#4a64a0",
+  insurance: "#388d82",
+  tax: "#a08a5a",
+  donation: "#7665a8",
+};
+
+// 自訂分類依 ID 雜湊取色，不含灰階以免和轉帳、未分類混淆。
+const CUSTOM_CATEGORY_COLORS = [
   "#b75b45",
-  "#c7922b",
-  "#7665a8",
-  "#388d82",
   "#a45c78",
-  "#68747b",
+  "#3e6f7c",
+  "#c7922b",
+  "#4a64a0",
+  "#8c6844",
+  "#388d82",
+  "#7665a8",
+  "#2f6b4f",
+  "#687f42",
+  "#d07a3a",
 ];
 
-export function activityAmountTwd(
-  item: ActivityItem,
-  rates: Record<string, number>,
-): number | undefined {
-  const amount = activityDisplayAmount(item);
-  if (amount == null) return undefined;
-  if (amount === 0) return 0;
-  if (item.currency === "TWD") return amount;
-  const rate = rates[item.currency];
-  return rate != null && Number.isFinite(rate) && rate > 0
-    ? amount * rate
-    : undefined;
-}
-
-export function activityCashAmountTwd(
-  item: ActivityItem,
-  rates: Record<string, number>,
-) {
-  if (
-    item.amount == null ||
-    item.excludedFromCalculation ||
-    (item.source !== "bank" &&
-      item.source !== "card" &&
-      item.source !== "invoice")
-  )
-    return 0;
-  return activityAmountTwd(item, rates) ?? 0;
-}
-
-/**
- * Contribution to one flow's total in TWD. Refunds sit on the expense side as
- * negative amounts, so they reduce their category instead of adding income.
- */
-export function activityFlowAmountTwd(
-  item: ActivityItem,
-  flow: ActivityFlow,
-  rates: Record<string, number>,
-) {
-  if (activityCashFlow(item) !== flow) return 0;
-  const amount = activityCashAmountTwd(item, rates);
-  return flow === "expense" ? -amount : amount;
-}
-
-/** Net flow total; a refund from an earlier month still reduces this month. */
-export function activityFlowTotalTwd(
-  items: ActivityItem[],
-  flow: ActivityFlow,
-  rates: Record<string, number>,
-) {
-  return items.reduce(
-    (sum, item) => sum + activityFlowAmountTwd(item, flow, rates),
-    0,
-  );
+export function activityCategoryColor(categoryId: string | undefined): string {
+  const id = categoryId ?? "other";
+  const fixed = ACTIVITY_CATEGORY_COLOR_BY_ID[id];
+  if (fixed) return fixed;
+  let hash = 0;
+  for (const char of id) hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
+  return CUSTOM_CATEGORY_COLORS[hash % CUSTOM_CATEGORY_COLORS.length]!;
 }
 
 export function buildActivityCategorySlices(
@@ -89,27 +74,18 @@ export function buildActivityCategorySlices(
   flow: ActivityFlow,
   rates: Record<string, number>,
 ): ActivityCategorySlice[] {
-  const grouped = new Map<string, number>();
-
-  for (const item of items) {
-    if (activityCashFlow(item) !== flow) continue;
-    grouped.set(
-      item.category,
-      (grouped.get(item.category) ?? 0) +
-        activityFlowAmountTwd(item, flow, rates),
-    );
-  }
-
   // A category whose refunds exceed its spending has no slice to draw.
-  const sorted = [...grouped.entries()]
-    .filter(([, amount]) => amount > 0)
-    .sort((a, b) => b[1] - a[1]);
-  const total = sorted.reduce((sum, [, amount]) => sum + amount, 0);
+  const sorted = activityCategoryTotalsTwd(items, flow, rates);
+  const total = sorted.reduce((sum, { amount }) => sum + amount, 0);
+  const categoryIds = new Map<string, string | undefined>();
+  for (const item of items)
+    if (!categoryIds.has(item.category))
+      categoryIds.set(item.category, item.categoryId);
 
-  return sorted.map(([category, amount], index) => ({
+  return sorted.map(({ category, amount }) => ({
     category,
     amount,
     percentage: total === 0 ? 0 : (amount / total) * 100,
-    color: ACTIVITY_CATEGORY_COLORS[index % ACTIVITY_CATEGORY_COLORS.length]!,
+    color: activityCategoryColor(categoryIds.get(category)),
   }));
 }
