@@ -139,7 +139,7 @@ function createServer(
     "search_activity",
     {
       description:
-        "以關鍵字搜尋銀行交易、刷卡與電子發票（含品項），由新到舊最多回傳 30 筆；truncated 為 true 表示還有更多結果，可縮小日期範圍再查。金額負數為支出。",
+        "以關鍵字搜尋銀行交易、刷卡與電子發票（含品項），關鍵字也會比對使用者寫的交易備註；由新到舊最多回傳 30 筆，note 為備註，truncated 為 true 表示還有更多結果，可縮小日期範圍再查。金額負數為支出。",
       inputSchema: z
         .object({
           query: z
@@ -147,7 +147,7 @@ function createServer(
             .trim()
             .min(1)
             .max(200)
-            .describe("關鍵字，例如商家、品項或帳戶名稱。"),
+            .describe("關鍵字，例如商家、品項、帳戶名稱或備註內容。"),
           from: isoDate.optional().describe("起始日期 YYYY-MM-DD（含）。"),
           to: isoDate.optional().describe("結束日期 YYYY-MM-DD（含）。"),
           source: z
@@ -169,7 +169,7 @@ function createServer(
     "get_upcoming_payments",
     {
       description:
-        "5 天內到期或已逾期的信用卡與貸款繳款提醒。state：due 待繳、overdue 已過期限、confirm 狀態不明請確認、collection_failed 扣款未完成、insufficient_funds 扣款帳戶餘額不足（shortfall 為差額）。扣款帳戶餘額足夠的款項不列出。",
+        "5 天內到期或已逾期、尚未付清的信用卡與貸款款項，依緊急程度排序。state：collection_failed 扣款未完成、insufficient_funds 扣款帳戶餘額不足（shortfall 為差額）、overdue 已過期限、due 待繳、confirm 狀態不明請確認、covered 扣款帳戶餘額足夠，預計自動扣款，不需處理（排在最後）。balanceCheck 為扣款帳戶餘額比對結果：covered、insufficient、stale 扣款帳戶資料超過 48 小時未更新而未比對、unknown 金額或餘額不明、not_set 未設定扣款帳戶。stale 為 true 表示款項本身的資料過舊。資料過舊時可經使用者同意後以 call_api 同步對應的 connectorId（款項或 paymentAccount），再重新查詢。已繳清的帳單不列出，需要時以 query_api 讀取 GET /bank/bills 的 isPaid。",
       annotations: READ_ONLY,
     },
     () => jsonResult("get_upcoming_payments", () => getUpcomingPayments(db)),

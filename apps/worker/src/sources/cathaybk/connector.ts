@@ -16,6 +16,7 @@ import puppeteer, {
   TimeoutError,
 } from "@cloudflare/puppeteer";
 import type {
+  AutopayAccountHint,
   BankAccount,
   BankBalanceSnapshot,
   BankTransaction,
@@ -34,12 +35,28 @@ import {
   parseCathayForeignDeposits,
 } from "./protocol";
 import {
+  CATHAY_LOAN_DETAIL_URL,
+  extractCathayLoanDetailDom,
+  getCathayApiSession,
+  parseCathayLoanAutopayAccount,
+  queryCathayLoanAutopayApi,
+  type CathayApiSessionResult,
+  type CathayLoanAutopayApiResult,
+} from "./loan-detail";
+import {
   extractCathayLoanOverviewDom,
   isCathayLoanOverviewQuerySettled,
   logCathayLoanDomDiagnostics,
   logCathayLoanStage,
   parseCathayLoanOverviewForSync,
+  type CathayLoanRecord,
 } from "./loan-overview";
+import {
+  parseCathayLoanOverviewApi,
+  queryCathayLoanOverviewApi,
+  type CathayLoanOverviewApiParseResult,
+  type CathayLoanOverviewApiResponse,
+} from "./loan-overview-api";
 
 const LOGIN_URL = "https://www.cathaybk.com.tw/MyBank/";
 const DEPOSIT_OVERVIEW_URL =
@@ -1039,9 +1056,47 @@ async function dismissInterstitialIfPresent(
   return hasWarning as boolean;
 }
 
+/** 登入頁的系統公告在 DOMContentLoaded 後才淡入；最多等這麼久。 */
+const CATHAY_SYSTEM_MESSAGE_SHOW_TIMEOUT_MS = 3_000;
+
 export async function dismissCathaySystemMessageIfPresent(
-  page: Pick<CathayLoginPage, "$" | "waitForSelector">,
+  page: Pick<
+    CathayLoginPage,
+    "$" | "evaluate" | "waitForFunction" | "waitForSelector"
+  >,
 ): Promise<boolean> {
+  // 公告先以 `modal fade` 掛在頁面上，之後才加上 `show` 開始動畫：背景淡入 0.15 秒、對話框
+  // 下滑 0.3 秒。Bootstrap 4 在動畫結束前會忽略關閉（`_isTransitioning`）。不能靠指令往返延遲
+  // 剛好蓋過這段時間：延遲短時（例如同機的瀏覽器）會在公告出現前就判定沒有公告，或在動畫中
+  // 按下「我知道了」而關不掉。所以等對話框動畫結束（transform 回到 none）再操作。
+  const shown = await page
+    .waitForFunction(
+      () => {
+        const modal = document.querySelector<HTMLElement>(
+          "#divSystemLoginMsgList",
+        );
+        const dismissed = (
+          window as typeof window & { __cathaySystemMessageDismissed?: boolean }
+        ).__cathaySystemMessageDismissed;
+        if (!modal?.querySelector("button.btn-fill") || dismissed) {
+          return "absent";
+        }
+        const dialog = modal.querySelector<HTMLElement>(".modal-dialog");
+        return modal.classList.contains("show") &&
+          getComputedStyle(modal).opacity === "1" &&
+          (!dialog || getComputedStyle(dialog).transform === "none")
+          ? "shown"
+          : false;
+      },
+      { timeout: CATHAY_SYSTEM_MESSAGE_SHOW_TIMEOUT_MS },
+    )
+    .then(async (handle) => (await handle.jsonValue()) === "shown")
+    .catch((error: unknown) => {
+      if (error instanceof TimeoutError) return false;
+      throw error;
+    });
+  if (!shown) return false;
+
   const selector = "#divSystemLoginMsgList.show button.btn-fill";
   let dismissButton = await page.$(selector);
   if (!dismissButton) return false;
@@ -1061,6 +1116,12 @@ export async function dismissCathaySystemMessageIfPresent(
       await page.waitForSelector("#divSystemLoginMsgList.show", {
         hidden: true,
         timeout: 5000,
+      });
+      // 同一頁再次檢查時不必再等公告淡入；重新載入頁面後旗標就會消失。
+      await page.evaluate(() => {
+        (
+          window as typeof window & { __cathaySystemMessageDismissed?: boolean }
+        ).__cathaySystemMessageDismissed = true;
       });
       return true;
     }
@@ -1906,6 +1967,31 @@ function normalizeCathayBillDate(value: unknown): string | undefined {
   return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
+/**
+ * `C_BILL_Q_RecentBillInfo` 的自動扣繳狀態（官方前端列舉：Enable／Disable／
+ * NotApply／Close）。Enable 且有銀行代碼與末四碼時回傳扣繳帳戶；NotApply 與
+ * Disable（官方顯示未設定／扣繳帳號失效）為 null；Close、缺欄或未知值為
+ * undefined，保留既有資料。
+ */
+export function parseCathayAutopayAccount(
+  summary: Record<string, unknown>,
+): AutopayAccountHint | null | undefined {
+  const status = summary.autoDebitStatus;
+  if (status === "NotApply" || status === "Disable") return null;
+  if (status !== "Enable") return undefined;
+  const bankCode =
+    typeof summary.autoDebitBankId === "string" &&
+    /^\d{3}$/.test(summary.autoDebitBankId)
+      ? summary.autoDebitBankId
+      : undefined;
+  const last4 =
+    typeof summary.autoDebitAccountLast4 === "string" &&
+    /^\d{4}$/.test(summary.autoDebitAccountLast4)
+      ? summary.autoDebitAccountLast4
+      : undefined;
+  return bankCode && last4 ? { bankCode, last4 } : undefined;
+}
+
 export function parseCathayCurrentBills(
   recentBillInfoValue: unknown,
   billInfoValue: unknown,
@@ -1949,6 +2035,7 @@ export function parseCathayCurrentBills(
 
   const bankAccounts: Scraped["bankAccounts"] = [];
   const creditCardBills: Scraped["creditCardBills"] = [];
+  const autopayAccounts = new Map<string, AutopayAccountHint | null>();
   for (const { currency, summary } of summaries) {
     const matchingRows = currencyRows.filter(
       (row) => row.currency === currency && row.currencyDataType === currency,
@@ -1968,6 +2055,30 @@ export function parseCathayCurrentBills(
       currentInfo?.currentMinPaymentAmount,
     );
     const accountId = currency === "TWD" ? sourceId : `${sourceId}:${currency}`;
+    const autopayAccount = parseCathayAutopayAccount(summary);
+    const autoDebitStatus = summary.autoDebitStatus;
+    console.log(
+      JSON.stringify({
+        event: "cathaybk_card_autopay",
+        currency,
+        status: ["Close", "NotApply", "Disable", "Enable"].includes(
+          String(autoDebitStatus),
+        )
+          ? autoDebitStatus
+          : autoDebitStatus === undefined
+            ? "missing"
+            : "other",
+        result:
+          autopayAccount === undefined
+            ? "unknown"
+            : autopayAccount === null
+              ? "unset"
+              : "found",
+      }),
+    );
+    if (autopayAccount !== undefined) {
+      autopayAccounts.set(accountId, autopayAccount);
+    }
     const isPaid =
       currency === "TWD" && twdPayStatus === "Payed"
         ? unpaidAmount !== undefined && unpaidAmount > 0
@@ -1984,6 +2095,7 @@ export function parseCathayCurrentBills(
         accountName: `國泰信用卡外幣帳單（${currency}）`,
         accountType: "credit",
         currency,
+        ...(autopayAccount !== undefined ? { autopayAccount } : {}),
         raw: { parentSourceId: sourceId, currency, purpose: "currency_bill" },
       });
     }
@@ -2015,7 +2127,7 @@ export function parseCathayCurrentBills(
     });
   }
 
-  return { bankAccounts, creditCardBills };
+  return { bankAccounts, creditCardBills, autopayAccounts };
 }
 
 export function parseCathayHistoryBills(
@@ -2332,6 +2444,20 @@ export async function scrapeCreditCards(page: Page): Promise<Scraped> {
             : null,
         currency:
           typeof summary.currency === "string" ? summary.currency : null,
+        // 自動扣繳帳號只在頁面內取末四碼，完整帳號不離開瀏覽器。
+        autoDebitStatus:
+          typeof summary.autoDebitStatus === "string"
+            ? summary.autoDebitStatus
+            : null,
+        autoDebitBankId:
+          typeof summary.bankId === "string" && /^\d{3}$/.test(summary.bankId)
+            ? summary.bankId
+            : null,
+        autoDebitAccountLast4:
+          typeof summary.account === "string" &&
+          /^\d{4,}$/.test(summary.account.trim())
+            ? summary.account.trim().slice(-4)
+            : null,
       };
     }
     const recentBillResponse = successfulContent(
@@ -2444,6 +2570,13 @@ export async function scrapeCreditCards(page: Page): Promise<Scraped> {
     latestBillContent,
     sourceId,
   );
+  const mainAutopay = currentBills.autopayAccounts.get(sourceId);
+  if (mainAutopay !== undefined) {
+    const mainAccount = bankAccounts.find(
+      (account) => account.sourceId === sourceId,
+    );
+    if (mainAccount) mainAccount.autopayAccount = mainAutopay;
+  }
   bankAccounts.push(...currentBills.bankAccounts);
   creditCardBills.push(
     ...mergeCathayCurrentBills(historyBills, currentBills.creditCardBills),
@@ -2498,6 +2631,187 @@ export async function scrapeCreditCards(page: Page): Promise<Scraped> {
 }
 
 export async function scrapeLoans(page: Page): Promise<LoanScraped> {
+  // 主要方式：在已登入的 OnlineBanking 頁面內呼叫 L_ACCT_Q_OverView，不開啟
+  // 貸款總覽頁；API 失敗時才改走總覽頁 DOM 解析，避免同步退化。
+  const api = await readCathayLoanOverviewFromApi(page);
+  let loanOverview: { loanRecords: CathayLoanRecord[]; complete: boolean };
+  if (api.parsed?.ok) {
+    loanOverview = api.parsed;
+    logCathayLoanOverview({
+      method: "api",
+      count: loanOverview.loanRecords.length,
+      complete: loanOverview.complete,
+      returnCode: api.returnCode,
+      status: api.status,
+      fallbackReason: null,
+      sessionResult: api.sessionResult,
+    });
+  } else {
+    const fallbackReason =
+      api.parsed && !api.parsed.ok ? api.parsed.reason : api.failure;
+    let count: number | null = null;
+    let complete: boolean | null = null;
+    try {
+      loanOverview = await readCathayLoanOverviewFromPage(page);
+      count = loanOverview.loanRecords.length;
+      complete = loanOverview.complete;
+    } finally {
+      logCathayLoanOverview({
+        method: "page",
+        count,
+        complete,
+        returnCode: api.returnCode,
+        status: api.status,
+        fallbackReason: fallbackReason ?? "unknown",
+        sessionResult: api.sessionResult,
+      });
+    }
+  }
+
+  const { bankAccounts, bankBalanceSnapshots } = mapCathayLoanRecords(
+    loanOverview.loanRecords,
+  );
+
+  // 同一個 session（GetJWT + UserProfile idType）沿用到扣款帳戶 API；取不到
+  // session 時由扣款帳戶流程在貸款總覽頁上自行再取一次。
+  await attachCathayLoanAutopayAccounts(
+    page,
+    bankAccounts,
+    api.sessionResult?.session ? api.sessionResult : undefined,
+  );
+
+  return {
+    bankAccounts,
+    bankBalanceSnapshots,
+    bankTransactions: [],
+    creditCardBills: [],
+    loanOverviewComplete: loanOverview.complete,
+  };
+}
+
+type CathayLoanOverviewApiAttempt = {
+  sessionResult: CathayApiSessionResult | undefined;
+  parsed: CathayLoanOverviewApiParseResult | undefined;
+  /** 未取得 API 回應前就失敗的原因。 */
+  failure:
+    "no_page_context" | "logout" | "no_session" | "evaluate_failed" | null;
+  returnCode: string;
+  status: string | null;
+};
+
+function isCathayOnlineBankingUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname === "www.cathaybk.com.tw" &&
+      parsed.pathname.startsWith("/OnlineBanking/") &&
+      !/\/logout\//i.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 取得 API session 並呼叫 `L_ACCT_Q_OverView`。目前頁面已在 OnlineBanking 時
+ * 直接使用（同源 XHR）；否則以 `domcontentloaded` 開啟存款總覽作為輕量頁面，
+ * 不開啟貸款總覽頁。永不拋錯；失敗時由呼叫端改走 DOM。
+ */
+async function readCathayLoanOverviewFromApi(
+  page: Page,
+): Promise<CathayLoanOverviewApiAttempt> {
+  const attempt: CathayLoanOverviewApiAttempt = {
+    sessionResult: undefined,
+    parsed: undefined,
+    failure: null,
+    returnCode: "not_called",
+    status: null,
+  };
+  if (!isCathayOnlineBankingUrl(page.url())) {
+    try {
+      await page.goto(DEPOSIT_OVERVIEW_URL, {
+        waitUntil: "domcontentloaded",
+        timeout: 30_000,
+      });
+    } catch {
+      attempt.failure = "no_page_context";
+      return attempt;
+    }
+    if (/\/logout\//i.test(page.url())) {
+      attempt.failure = "logout";
+      return attempt;
+    }
+    if (!isCathayOnlineBankingUrl(page.url())) {
+      attempt.failure = "no_page_context";
+      return attempt;
+    }
+  }
+
+  attempt.sessionResult = await getCathayApiSessionSafely(page);
+  const session = attempt.sessionResult?.session ?? null;
+  if (!session) {
+    attempt.failure = "no_session";
+    return attempt;
+  }
+  let response: CathayLoanOverviewApiResponse | undefined;
+  try {
+    response = await page.evaluate(queryCathayLoanOverviewApi, { session });
+  } catch {
+    attempt.failure = "evaluate_failed";
+    return attempt;
+  }
+  if (!response || typeof response !== "object") {
+    attempt.failure = "evaluate_failed";
+    return attempt;
+  }
+  attempt.returnCode =
+    typeof response.returnCode === "string" &&
+    /^[A-Za-z0-9_]{1,12}$/.test(response.returnCode)
+      ? response.returnCode
+      : "invalid";
+  attempt.status =
+    typeof response.status === "string" &&
+    /^[A-Za-z_]{1,20}$/.test(response.status)
+      ? response.status
+      : null;
+  try {
+    attempt.parsed = parseCathayLoanOverviewApi(response);
+  } catch {
+    attempt.parsed = { ok: false, reason: "schema_mismatch" };
+  }
+  return attempt;
+}
+
+/** 記錄貸款總覽來源；不含帳號、金額、token、customerId 或 idType。 */
+function logCathayLoanOverview(fields: {
+  method: "api" | "page";
+  count: number | null;
+  complete: boolean | null;
+  returnCode: string;
+  status: string | null;
+  fallbackReason: string | null;
+  sessionResult: CathayApiSessionResult | undefined;
+}) {
+  console.log(
+    JSON.stringify({
+      event: "cathaybk_loan_overview",
+      method: fields.method,
+      count: fields.count,
+      complete: fields.complete,
+      returnCode: fields.returnCode,
+      status: fields.status,
+      fallbackReason: fields.fallbackReason,
+      apiJwtAvailable: fields.sessionResult?.diagnostics.jwtAvailable === true,
+      userProfileReturnCode: cathayUserProfileReturnCode(fields.sessionResult),
+    }),
+  );
+}
+
+/** 後備方式：開啟貸款總覽頁並解析 DOM。 */
+async function readCathayLoanOverviewFromPage(
+  page: Page,
+): Promise<{ loanRecords: CathayLoanRecord[]; complete: boolean }> {
   logCathayLoanStage("navigation", "started", {
     navigationCompleted: false,
     logoutDetected: false,
@@ -2588,6 +2902,11 @@ export async function scrapeLoans(page: Page): Promise<LoanScraped> {
       overviewComplete: loanOverview.complete,
     },
   );
+  return loanOverview;
+}
+
+/** API 與 DOM 兩種來源共用的帳戶／餘額快照對應，確保兩者輸出完全相同。 */
+function mapCathayLoanRecords(loanRecords: CathayLoanRecord[]) {
   const asOfAt = new Date().toISOString();
   const bankAccounts: Scraped["bankAccounts"] = [];
   const bankBalanceSnapshots: Scraped["bankBalanceSnapshots"] = [];
@@ -2665,13 +2984,280 @@ export async function scrapeLoans(page: Page): Promise<LoanScraped> {
     mappedSnapshotCount: bankBalanceSnapshots.length,
   });
 
-  return {
-    bankAccounts,
-    bankBalanceSnapshots,
-    bankTransactions: [],
-    creditCardBills: [],
-    loanOverviewComplete: loanOverview.complete,
+  return { bankAccounts, bankBalanceSnapshots };
+}
+
+class CathayForcedLogoutError extends Error {
+  constructor() {
+    super("Cathay Bank forced logout on loan detail page.");
+    this.name = "CathayForcedLogoutError";
+  }
+}
+
+/**
+ * 讀取各筆貸款的扣款帳戶。明細只是補充資訊：單筆讀取失敗時不寫
+ * `autopayAccount`（保留舊資料），不影響貸款同步本身。
+ *
+ * 主要方式在目前的 OnlineBanking 頁面內直接呼叫 `L_ACCT_Q_OverViewDetail`，
+ * 不載入頁面以節省 Worker CPU；只有 API 對所有貸款都無法取得可用回應時，
+ * 才改為逐筆開啟明細頁。部分失敗的貸款維持 undefined，不再開頁補查。
+ */
+async function attachCathayLoanAutopayAccounts(
+  page: Page,
+  loanAccounts: Scraped["bankAccounts"],
+  existingSession?: CathayApiSessionResult,
+) {
+  if (loanAccounts.length === 0) return;
+  const loanAccountNumbers = loanAccounts.map((account) =>
+    account.sourceId.replace(/^loan:cathaybk:/, ""),
+  );
+
+  const sessionResult =
+    existingSession ?? (await getCathayApiSessionSafely(page));
+  // session 只在兩次 page.evaluate 之間傳遞，不可寫入 log。
+  const session = sessionResult?.session ?? null;
+  const sessionLog = {
+    apiJwtAvailable: sessionResult?.diagnostics.jwtAvailable === true,
+    userProfileReturnCode: cathayUserProfileReturnCode(sessionResult),
   };
+  let api: CathayLoanAutopayApiResult | undefined;
+  if (session) {
+    try {
+      api = await page.evaluate(queryCathayLoanAutopayApi, {
+        accounts: loanAccountNumbers,
+        session,
+      });
+    } catch {
+      api = undefined;
+    }
+  }
+  const apiLoans = Array.isArray(api?.loans) ? api.loans : [];
+  const apiUsableCount = apiLoans.filter((loan) => loan.usable).length;
+
+  if (apiUsableCount > 0) {
+    let found = 0;
+    let unset = 0;
+    let unknown = 0;
+    for (const [index, account] of loanAccounts.entries()) {
+      const loan = apiLoans.find((item) => item.index === index);
+      const hint = loan?.autopayAccount;
+      let result: "found" | "unset" | "unknown" = "unknown";
+      if (
+        loan?.result === "found" &&
+        hint &&
+        /^\d{3}$/.test(hint.bankCode) &&
+        /^\d{4}$/.test(hint.last4)
+      ) {
+        account.autopayAccount = { bankCode: hint.bankCode, last4: hint.last4 };
+        result = "found";
+        found++;
+      } else if (loan?.result === "unset" && hint === null) {
+        account.autopayAccount = null;
+        result = "unset";
+        unset++;
+      } else {
+        unknown++;
+      }
+      // 每筆只記結構，不記帳號、金額或回應值。
+      console.log(
+        JSON.stringify({
+          event: "cathaybk_loan_autopay_detail",
+          index,
+          category: account.loanCategory ?? null,
+          result,
+          source: "api",
+          returnCode: loan?.returnCode ?? "missing",
+          elapsedMs: loan?.elapsedMs ?? 0,
+          attempts: loan?.attempts ?? 0,
+        }),
+      );
+    }
+    console.log(
+      JSON.stringify({
+        event: "cathaybk_loan_autopay",
+        method: "api",
+        loanCount: loanAccounts.length,
+        found,
+        unset,
+        unknown,
+        apiUsableCount,
+        idTypeSent: api?.idTypeSent === true,
+        ...sessionLog,
+      }),
+    );
+    return;
+  }
+
+  await attachCathayLoanAutopayAccountsFromDetailPages(
+    page,
+    loanAccounts,
+    loanAccountNumbers,
+    { idTypeSent: api?.idTypeSent === true, ...sessionLog },
+  );
+}
+
+/** 取得頁面內 API session；失敗時回傳 undefined，不拋錯。 */
+async function getCathayApiSessionSafely(
+  page: Page,
+): Promise<CathayApiSessionResult | undefined> {
+  try {
+    const result = await page.evaluate(getCathayApiSession);
+    return result && typeof result === "object" ? result : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** UserProfile 的 returnCode，僅供 log；不含 token、customerId 或 idType 值。 */
+function cathayUserProfileReturnCode(
+  result: CathayApiSessionResult | undefined,
+): string {
+  const code = result?.diagnostics.userProfileReturnCode;
+  return typeof code === "string" && /^[A-Za-z0-9_]{1,12}$/.test(code)
+    ? code
+    : "missing";
+}
+
+/** 後備方式：逐筆開啟貸款明細頁，依標籤讀取扣款行庫與扣款帳號。 */
+async function attachCathayLoanAutopayAccountsFromDetailPages(
+  page: Page,
+  loanAccounts: Scraped["bankAccounts"],
+  loanAccountNumbers: string[],
+  apiDiagnostics: {
+    apiJwtAvailable: boolean;
+    idTypeSent: boolean;
+    userProfileReturnCode: string;
+  },
+) {
+  let found = 0;
+  let unset = 0;
+  let unknown = 0;
+  // 明細頁每次都是完整頁面載入；在瀏覽器端擋掉圖片、字型與第三方追蹤，
+  // 減少 CDP 事件，避免整體同步超過 Worker CPU 上限。
+  const blocker = await blockCathayLoanDetailAssets(page);
+  try {
+    for (const [index, account] of loanAccounts.entries()) {
+      const loanAccountNumber = loanAccountNumbers[index];
+      // 每筆只記結構與布林，不記帳號、金額或頁面文字值。
+      const log: Record<string, unknown> = {
+        event: "cathaybk_loan_autopay_detail",
+        index,
+        category: account.loanCategory ?? null,
+        source: "page",
+      };
+      const startedAt = Date.now();
+      try {
+        await page.goto(
+          `${CATHAY_LOAN_DETAIL_URL}?account=${encodeURIComponent(loanAccountNumber)}`,
+          { waitUntil: "domcontentloaded", timeout: 30_000 },
+        );
+        const finalUrl = page.url();
+        if (finalUrl.includes("/logout/")) {
+          throw new CathayForcedLogoutError();
+        }
+        log.waitResolved = await page
+          .waitForFunction(
+            () => {
+              const text = document.body?.textContent ?? "";
+              return (
+                /扣款行庫/.test(text) &&
+                /扣款帳號/.test(text) &&
+                /[(（]\d{3}[)）]/.test(text)
+              );
+            },
+            { timeout: 10_000 },
+          )
+          .then(() => true)
+          .catch((error: unknown) => {
+            if (!(error instanceof TimeoutError)) throw error;
+            return false;
+          });
+        const extraction = await page.evaluate(extractCathayLoanDetailDom);
+        log.fieldSource = extraction.fieldSource;
+        const autopayAccount = parseCathayLoanAutopayAccount(
+          extraction,
+          loanAccountNumber,
+        );
+        if (autopayAccount === undefined) {
+          log.result = "unknown";
+          unknown++;
+          continue;
+        }
+        account.autopayAccount = autopayAccount;
+        log.result = autopayAccount === null ? "unset" : "found";
+        if (autopayAccount === null) unset++;
+        else found++;
+      } catch (error) {
+        log.result = "error";
+        log.errorName = error instanceof Error ? error.name : typeof error;
+        unknown++;
+        if (error instanceof CathayForcedLogoutError) throw error;
+      } finally {
+        log.elapsedMs = Date.now() - startedAt;
+        console.log(JSON.stringify(log));
+      }
+    }
+  } finally {
+    await blocker?.release();
+  }
+  console.log(
+    JSON.stringify({
+      event: "cathaybk_loan_autopay",
+      method: "page",
+      loanCount: loanAccounts.length,
+      found,
+      unset,
+      unknown,
+      assetBlocking: blocker !== undefined,
+      ...apiDiagnostics,
+    }),
+  );
+}
+
+const CATHAY_LOAN_DETAIL_BLOCKED_URLS = [
+  "*.png*",
+  "*.jpg*",
+  "*.jpeg*",
+  "*.gif*",
+  "*.svg*",
+  "*.webp*",
+  "*.ico*",
+  "*.woff*",
+  "*.ttf*",
+  "*.mp4*",
+  "*licdn.com*",
+  "*flvcdn.net*",
+  "*facebook.*",
+  "*doubleclick.net*",
+  "*google-analytics.com*",
+  "*googletagmanager.com*",
+  "*amazonaws.com*",
+  "*demdex.net*",
+  "*omtrdc.net*",
+  "*cathay-cube.com.tw*",
+];
+
+async function blockCathayLoanDetailAssets(
+  page: Page,
+): Promise<{ release: () => Promise<void> } | undefined> {
+  if (typeof page.createCDPSession !== "function") return undefined;
+  try {
+    const cdp = await page.createCDPSession();
+    await cdp.send("Network.enable");
+    await cdp.send("Network.setBlockedURLs", {
+      urls: CATHAY_LOAN_DETAIL_BLOCKED_URLS,
+    });
+    return {
+      release: async () => {
+        await cdp
+          .send("Network.setBlockedURLs", { urls: [] })
+          .catch(() => undefined);
+        await cdp.detach().catch(() => undefined);
+      },
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 // ---- Utilities ----

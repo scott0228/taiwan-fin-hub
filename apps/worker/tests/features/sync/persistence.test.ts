@@ -12,6 +12,7 @@ import {
   linkCanonicalBankAccountsStatement,
 } from "../../../src/features/sync/connector-repository";
 import { deactivateMissingCathayLoanAccountsStatement } from "../../../src/sources/cathaybk/repository";
+import { reconcileHncbSingleCardSummaryAccountStatements } from "../../../src/sources/hncb/repository";
 import {
   bankAccountRecord,
   bankBalanceSnapshotRecord,
@@ -782,7 +783,7 @@ describe("同步資料完整性（隔離 D1）", () => {
       await db.batch([
         db
           .prepare(
-            "INSERT INTO bank_transaction_preferences VALUES (?, 1, 'created', 'updated')",
+            "INSERT INTO bank_transaction_preferences (transaction_id, excluded_from_calculation, created_at, updated_at) VALUES (?, 1, 'created', 'updated')",
           )
           .bind(pendingId),
         db
@@ -976,7 +977,7 @@ describe("同步資料完整性（隔離 D1）", () => {
       await db.batch([
         db
           .prepare(
-            "INSERT INTO bank_transaction_preferences VALUES (?, 1, 't', 't')",
+            "INSERT INTO bank_transaction_preferences (transaction_id, excluded_from_calculation, created_at, updated_at) VALUES (?, 1, 't', 't')",
           )
           .bind(authorizations[0].recordKey),
         db
@@ -1178,6 +1179,109 @@ describe("同步資料完整性（隔離 D1）", () => {
     },
   );
 
+  it("摘要卡帳戶併回實體卡後，來源再次退回摘要卡仍更新同一筆快照、帳單與交易", async () => {
+    const write = (
+      cardLast4: "main" | "1234",
+      balance: number,
+      asOfAt: string,
+    ) => {
+      const accountId = `credit:hncb:${cardLast4}`;
+      const activity =
+        cardLast4 === "main"
+          ? [
+              creditCardBillRecord(
+                "hncb",
+                {
+                  accountId,
+                  sourceId: "hncb:card:bill:2026-10",
+                  billingPeriod: "2026-10",
+                  statementAmount: -balance,
+                  currency: "TWD",
+                },
+                now,
+              ),
+              bankTransactionRecord(
+                "hncb",
+                {
+                  accountId,
+                  sourceId: "hncb:card:tx:v2:main:2026-10-05:252:1",
+                  authorizedAt: "2026-10-05",
+                  postedDate: "2026-10-06",
+                  description: "合成商店",
+                  amount: -252,
+                  currency: "TWD",
+                  status: "posted",
+                },
+                now,
+              ),
+            ]
+          : [];
+      return persistStagedSyncWrite(db, {
+        records: [
+          bankAccountRecord(
+            "hncb",
+            { sourceId: accountId, accountType: "credit", currency: "TWD" },
+            now,
+          ),
+          bankBalanceSnapshotRecord(
+            "hncb",
+            {
+              accountId,
+              sourceId: `snapshot:hncb:credit:${cardLast4}`,
+              balance,
+              currency: "TWD",
+              asOfAt,
+            },
+            now,
+          ),
+          ...activity,
+        ],
+        afterPromoteStatements:
+          reconcileHncbSingleCardSummaryAccountStatements(db),
+      });
+    };
+    const rows = async (table: string, columns: string) =>
+      (
+        await db
+          .prepare(
+            `SELECT ${columns} FROM ${table} WHERE connector_id = 'hncb' ORDER BY id`,
+          )
+          .all()
+      ).results;
+    const card = "hncb:credit:hncb:1234";
+
+    await write("main", -100, "2026-10-01T00:00:00Z");
+    await write("1234", -200, "2026-10-02T00:00:00Z");
+    expect(await write("main", -300, "2026-10-03T00:00:00Z")).toMatchObject({
+      bankTransactions: 0,
+    });
+
+    expect(await rows("bank_accounts", "id")).toEqual([{ id: card }]);
+    expect(
+      await rows("bank_balance_snapshots", "account_id, source_id, balance"),
+    ).toEqual([
+      {
+        account_id: card,
+        source_id: "snapshot:hncb:credit:1234",
+        balance: -200,
+      },
+      {
+        account_id: card,
+        source_id: "snapshot:hncb:credit:main",
+        balance: -300,
+      },
+    ]);
+    expect(
+      await rows("credit_card_bills", "account_id, statement_amount"),
+    ).toEqual([{ account_id: card, statement_amount: 300 }]);
+    expect(await rows("bank_transactions", "account_id")).toEqual([
+      { account_id: card },
+    ]);
+    expect(
+      (await db.prepare("PRAGMA foreign_key_check").all()).results,
+    ).toEqual([]);
+  });
+
   it("玉山即時授權與未入帳明細接到入帳，跨來源店名不同仍保留單筆及所有使用者設定", async () => {
     const sourceId = "credit:esun:1234";
     const card = bankAccountRecord(
@@ -1213,12 +1317,17 @@ describe("同步資料完整性（隔離 D1）", () => {
     await db.batch([
       db
         .prepare(
-          "INSERT INTO bank_transaction_preferences VALUES (?, 1, 't', 't')",
+          "INSERT INTO bank_transaction_preferences (transaction_id, excluded_from_calculation, created_at, updated_at) VALUES (?, 1, 't', 't')",
         )
         .bind(pending.recordKey),
       db
         .prepare(
           "INSERT INTO classification_overrides VALUES ('esun-category', 'bank_transaction', ?, 'food', 't', 't')",
+        )
+        .bind(pending.recordKey),
+      db
+        .prepare(
+          "UPDATE bank_transaction_preferences SET note = '代墊同事午餐' WHERE transaction_id = ?",
         )
         .bind(pending.recordKey),
       db.prepare(
@@ -1258,7 +1367,27 @@ describe("同步資料完整性（隔離 D1）", () => {
         amount: -252,
         authorizedAt: "2026-10-04T16:30:00Z",
         calculationPreference: 1,
+        note: "代墊同事午餐",
       },
+    ]);
+    // 備註搬到入帳交易；之後重送同一組配對不會把舊內容再附加回使用者改過的備註。
+    await db
+      .prepare(
+        "UPDATE bank_transaction_preferences SET note = '代墊同事午餐，已收回' WHERE transaction_id = ?",
+      )
+      .bind(posted.recordKey)
+      .run();
+    await write([pending, history, posted]);
+    expect(
+      (
+        await db
+          .prepare(
+            "SELECT transaction_id, note FROM bank_transaction_preferences WHERE note IS NOT NULL",
+          )
+          .all()
+      ).results,
+    ).toEqual([
+      { transaction_id: posted.recordKey, note: "代墊同事午餐，已收回" },
     ]);
     expect(
       await db
@@ -1343,7 +1472,12 @@ describe("同步資料完整性（隔離 D1）", () => {
           .bind(p.recordKey),
         db
           .prepare(
-            "INSERT INTO bank_transaction_preferences VALUES (?, 1, 't', 't')",
+            "INSERT INTO bank_transaction_preferences (transaction_id, excluded_from_calculation, created_at, updated_at) VALUES (?, 1, 't', 't')",
+          )
+          .bind(p.recordKey),
+        db
+          .prepare(
+            "UPDATE bank_transaction_preferences SET note = '房租' WHERE transaction_id = ?",
           )
           .bind(p.recordKey),
         db.prepare(
@@ -1390,6 +1524,15 @@ describe("同步資料完整性（隔離 D1）", () => {
           )
           .first("transaction_id"),
       ).toBe(target);
+      expect(
+        (
+          await db
+            .prepare(
+              "SELECT transaction_id, note FROM bank_transaction_preferences WHERE note IS NOT NULL",
+            )
+            .all()
+        ).results,
+      ).toEqual([{ transaction_id: target, note: "房租" }]);
       expect(await listBankTransactions(db, 20)).toHaveLength(
         scenario === "授權碼不同" ? 3 : 2,
       );
@@ -1549,7 +1692,7 @@ describe("同步資料完整性（隔離 D1）", () => {
       await db.batch([
         db
           .prepare(
-            "INSERT INTO bank_transaction_preferences VALUES (?, ?, 't', 't')",
+            "INSERT INTO bank_transaction_preferences (transaction_id, excluded_from_calculation, created_at, updated_at) VALUES (?, ?, 't', 't')",
           )
           .bind(id, excluded),
         db
@@ -1660,7 +1803,7 @@ describe("同步資料完整性（隔離 D1）", () => {
         finalizeStatements: [
           finalize,
           db.prepare(
-            "INSERT INTO bank_transaction_preferences VALUES ('missing', 1, 't', 't')",
+            "INSERT INTO bank_transaction_preferences (transaction_id, excluded_from_calculation, created_at, updated_at) VALUES ('missing', 1, 't', 't')",
           ),
         ],
       }),
@@ -1830,7 +1973,7 @@ describe("同步資料完整性（隔離 D1）", () => {
     ).toBe(1);
     await db
       .prepare(
-        "INSERT INTO bank_transaction_preferences VALUES ('sinopac:purchase', 1, 'created', 'updated')",
+        "INSERT INTO bank_transaction_preferences (transaction_id, excluded_from_calculation, created_at, updated_at) VALUES ('sinopac:purchase', 1, 'created', 'updated')",
       )
       .run();
     for (const records of [
@@ -1867,6 +2010,7 @@ describe("同步資料完整性（隔離 D1）", () => {
       excluded_from_calculation: 1,
       created_at: "created",
       updated_at: "updated",
+      note: null,
     });
   });
 
