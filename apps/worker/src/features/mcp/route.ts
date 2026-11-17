@@ -3,22 +3,30 @@ import {
   McpServer,
   originValidationResponse,
 } from "@modelcontextprotocol/server";
+import { connectorCatalog, type ConnectorId } from "@taiwan-fin-hub/shared";
 import { z } from "zod";
 import { sanitizeDatabaseError } from "../../db";
 import type { Env } from "../../platform/env";
 import { honoFactory } from "../../platform/hono";
 import { isDemoMode } from "../../platform/http";
+import { monthRangeQuerySchema } from "../../platform/month-range";
+import { manualTransactionsSchema } from "../manual-transactions/schema";
 import {
   WRITE_API_METHODS,
   callApi,
   listApiEndpoints,
+  recordManualTransactions,
+  serializeApiResult,
+  startSyncs,
   type ApiApp,
   type ApiCallInput,
   type ApiExecutionContext,
 } from "./api";
 import {
+  McpToolInputError,
   getFinancialOverview,
-  getMonthlyCashFlow,
+  getCashFlow,
+  getSyncStatus,
   getUpcomingPayments,
   listAccounts,
   listInvestmentHoldings,
@@ -26,6 +34,10 @@ import {
 } from "./service";
 
 const isoDate = z.iso.date();
+const CONNECTOR_IDS = Object.keys(connectorCatalog) as [
+  ConnectorId,
+  ...ConnectorId[],
+];
 const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
 
 type ApiContext = {
@@ -42,6 +54,11 @@ async function jsonResult(tool: string, load: () => Promise<unknown>) {
       content: [{ type: "text" as const, text: JSON.stringify(await load()) }],
     };
   } catch (error) {
+    if (error instanceof McpToolInputError)
+      return {
+        isError: true,
+        content: [{ type: "text" as const, text: error.message }],
+      };
     const safeError = sanitizeDatabaseError(error);
     console.error(
       JSON.stringify({
@@ -59,7 +76,7 @@ async function jsonResult(tool: string, load: () => Promise<unknown>) {
 }
 
 // 身分驗證由 Composition Root 掛在 /mcp 的 accessMiddleware 負責。
-// 查詢工具直接讀取資料；其餘讀取經 query_api、編輯與同步經 call_api 走 /api，
+// 查詢工具直接讀取資料；其餘讀取經 query_api、編輯經 call_api、同步經 sync_sources 走 /api，
 // 由同一套 Access 驗證、Zod 驗證與錯誤處理把關。
 function createServer(
   db: D1Database,
@@ -121,25 +138,19 @@ function createServer(
     "get_monthly_cash_flow",
     {
       description:
-        "指定月份的收入、支出總額與各分類金額（新台幣，與 App 活動頁相同計算：發票與刷卡配對不重複計入、排除統計的項目不計、退款沖減支出）。",
-      inputSchema: z.object({
-        month: z
-          .string()
-          .regex(/^\d{4}-(0[1-9]|1[0-2])$/)
-          .optional()
-          .describe("YYYY-MM；省略時為台北時間本月。"),
-      }),
+        "月份的收入、支出總額與各分類金額（新台幣，與 App 活動頁相同計算：發票與刷卡配對不重複計入、排除統計的項目不計、退款沖減支出）。單月以 month（YYYY-MM）指定，全部省略時為台北時間本月；跨月比較或趨勢以 from、to（YYYY-MM，含頭尾，最多 12 個月）一次取得，結果在 months 依月份排列。要看某分類的明細時，以 search_activity 的 category 帶入分類名稱。",
+      inputSchema: monthRangeQuerySchema,
       annotations: READ_ONLY,
     },
-    ({ month }) =>
-      jsonResult("get_monthly_cash_flow", () => getMonthlyCashFlow(db, month)),
+    (input) =>
+      jsonResult("get_monthly_cash_flow", () => getCashFlow(db, input)),
   );
 
   server.registerTool(
     "search_activity",
     {
       description:
-        "以關鍵字搜尋銀行交易、刷卡與電子發票（含品項），關鍵字也會比對使用者寫的交易備註；由新到舊最多回傳 30 筆，note 為備註，truncated 為 true 表示還有更多結果，可縮小日期範圍再查。金額負數為支出。",
+        "列出或搜尋銀行交易、刷卡與電子發票（含品項）。query 為關鍵字，也會比對使用者寫的交易備註；省略 query 時列出日期範圍內的全部活動，須帶 from。category 以分類名稱篩選（名稱見 get_monthly_cash_flow 或結果的 category），例如某月餐飲的明細：category、from、to 加上 flow 為 expense。由新到舊每次最多回傳 30 筆，note 為備註。truncated 為 true 表示還有更多結果：以相同的參數加上 cursor（上一次回傳的 nextCursor）取得下一頁，或縮小日期範圍。金額負數為支出。",
       inputSchema: z
         .object({
           query: z
@@ -147,18 +158,37 @@ function createServer(
             .trim()
             .min(1)
             .max(200)
+            .optional()
             .describe("關鍵字，例如商家、品項、帳戶名稱或備註內容。"),
+          category: z
+            .string()
+            .trim()
+            .min(1)
+            .max(100)
+            .optional()
+            .describe("分類名稱，須與結果的 category 完全相同，例如餐飲。"),
           from: isoDate.optional().describe("起始日期 YYYY-MM-DD（含）。"),
           to: isoDate.optional().describe("結束日期 YYYY-MM-DD（含）。"),
           source: z
-            .enum(["all", "bank", "card", "invoice"])
+            .enum(["all", "bank", "card", "invoice", "manual"])
             .optional()
-            .describe("bank 為存款帳戶、card 為信用卡、invoice 為電子發票。"),
+            .describe(
+              "bank 為存款帳戶、card 為信用卡、invoice 為電子發票、manual 為手動記錄的現金收支。",
+            ),
           flow: z.enum(["all", "income", "expense"]).optional(),
+          cursor: z
+            .string()
+            .max(500)
+            .optional()
+            .describe("上一次回傳的 nextCursor，其他參數須與上一次相同。"),
         })
         .refine(
           (value) => !value.from || !value.to || value.from <= value.to,
           "from 不可晚於 to。",
+        )
+        .refine(
+          (value) => value.query !== undefined || value.from !== undefined,
+          "省略 query 時須帶 from。",
         ),
       annotations: READ_ONLY,
     },
@@ -169,22 +199,116 @@ function createServer(
     "get_upcoming_payments",
     {
       description:
-        "5 天內到期或已逾期、尚未付清的信用卡與貸款款項，依緊急程度排序。state：collection_failed 扣款未完成、insufficient_funds 扣款帳戶餘額不足（shortfall 為差額）、overdue 已過期限、due 待繳、confirm 狀態不明請確認、covered 扣款帳戶餘額足夠，預計自動扣款，不需處理（排在最後）。balanceCheck 為扣款帳戶餘額比對結果：covered、insufficient、stale 扣款帳戶資料超過 48 小時未更新而未比對、unknown 金額或餘額不明、not_set 未設定扣款帳戶。stale 為 true 表示款項本身的資料過舊。資料過舊時可經使用者同意後以 call_api 同步對應的 connectorId（款項或 paymentAccount），再重新查詢。已繳清的帳單不列出，需要時以 query_api 讀取 GET /bank/bills 的 isPaid。",
+        "5 天內到期或已逾期、尚未付清的信用卡與貸款款項，依緊急程度排序。state：collection_failed 扣款未完成、insufficient_funds 扣款帳戶餘額不足（shortfall 為差額）、overdue 已過期限、due 待繳、confirm 狀態不明請確認、covered 扣款帳戶餘額足夠，預計自動扣款，不需處理（排在最後）。balanceCheck 為扣款帳戶餘額比對結果：covered、insufficient、stale 扣款帳戶資料超過 48 小時未更新而未比對、unknown 金額或餘額不明、not_set 未設定扣款帳戶。stale 為 true 表示款項本身的資料過舊。資料過舊時可經使用者同意後以 sync_sources 同步對應的 connectorId（款項或 paymentAccount），完成後再重新查詢。已繳清的帳單不列出，需要時以 query_api 讀取 GET /bank/bills 的 isPaid。",
       annotations: READ_ONLY,
     },
     () => jsonResult("get_upcoming_payments", () => getUpcomingPayments(db)),
   );
 
   server.registerTool(
+    "get_sync_status",
+    {
+      description:
+        "已設定資料來源的同步狀態：connectorId、名稱、running（排隊或執行中）、lastSuccessAt 上次成功時間、lastStatus 與 lastError 最近一次結果、manualRun 最近一次由 sync_sources 或網頁觸發的背景同步（status：queued、running、completed、failed、needs_user_action、cancelled）。用來確認 sync_sources 的結果，或找出要同步的 connectorId。needs_user_action 表示需要使用者到網頁版完成驗證或更新帳密。",
+      annotations: READ_ONLY,
+    },
+    () => jsonResult("get_sync_status", () => getSyncStatus(db)),
+  );
+
+  server.registerTool(
+    "sync_sources",
+    {
+      description:
+        "同步指定的資料來源（銀行、券商、電子發票等），從來源抓取最新資料；connectorId 見 get_sync_status。同步在背景依序執行，會自動處理登入與驗證碼，每個來源約需 1 到數分鐘：本工具只回報是否已排入（queued），結果請稍後以 get_sync_status 確認，未完成前不要重複觸發。多數來源共用 Cloudflare Browser 每日額度（免費方案 10 分鐘，台灣時間早上 8 點重置）：請只同步使用者指定或資料過舊的來源，使用者要求同步全部時先提醒可能用完額度；錯誤為 BROWSER_BUSY 且訊息為今日額度用完時，重置前不要重試。",
+      inputSchema: z.object({
+        connectorIds: z
+          .array(z.enum(CONNECTOR_IDS))
+          .min(1)
+          .max(CONNECTOR_IDS.length)
+          .describe('要同步的資料來源 ID，例如 ["esun", "sinopac"]。'),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    ({ connectorIds }) =>
+      jsonResult("sync_sources", () =>
+        startSyncs(
+          apiContext.api,
+          apiContext.request,
+          apiContext.env,
+          apiContext.executionCtx,
+          connectorIds,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "record_manual_transactions",
+    {
+      description:
+        "記錄使用者親口告知、銀行與發票抓不到的現金收支（例如夜市、紅包），並維護現金帳戶餘額；回傳每筆的 id 與寫入後的現金餘額。只記使用者明確提供的金額與日期，不要推測或重複記錄已出現在 search_activity 的交易。ATM 提款請記為 transfer_in，會與同日同額的銀行提款配成互轉而不重複計入支出。修改已記錄的項目時帶相同的 externalId 重送；刪除請以 call_api 呼叫 DELETE /manual-transactions/<id>，id 為 search_activity 回傳的 manualTransactionId。",
+      inputSchema: manualTransactionsSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (input) => {
+      try {
+        const { isError, response } = await recordManualTransactions(
+          apiContext.api,
+          apiContext.request,
+          apiContext.env,
+          apiContext.executionCtx,
+          input,
+        );
+        return {
+          isError,
+          content: [{ type: "text" as const, text: JSON.stringify(response) }],
+        };
+      } catch (error) {
+        const safeError = sanitizeDatabaseError(error);
+        console.error(
+          JSON.stringify({
+            event: "mcp_tool_failed",
+            tool: "record_manual_transactions",
+            message:
+              safeError instanceof Error
+                ? safeError.message
+                : String(safeError),
+          }),
+        );
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: "寫入失敗，請稍後再試。" }],
+        };
+      }
+    },
+  );
+
+  server.registerTool(
     "list_api_endpoints",
     {
       description:
-        "列出 query_api 與 call_api 可呼叫的全部網頁版 API 端點、用途與 body 格式，以及資料來源 ID 與帳密欄位。",
+        "列出 query_api 與 call_api 可呼叫的網頁版 API 端點。不帶 resource 時回傳各類別（resource）的端點清單；帶 resource 時回傳該類端點的用途、query 與 body 格式，connectors 另含資料來源 ID 與帳密欄位。",
+      inputSchema: z.object({
+        resource: z
+          .string()
+          .max(50)
+          .optional()
+          .describe("端點類別，為路徑第一段，例如 bank、classification。"),
+      }),
       annotations: READ_ONLY,
     },
-    () =>
+    ({ resource }) =>
       jsonResult("list_api_endpoints", async () =>
-        listApiEndpoints(apiContext.api),
+        listApiEndpoints(apiContext.api, resource),
       ),
   );
 
@@ -203,7 +327,7 @@ function createServer(
     "query_api",
     {
       description:
-        "以 GET 讀取網頁版 API（例如交易、發票、帳單、分類規則、排程與同步狀態），只讀不寫；端點與 query 格式見 list_api_endpoints。回傳 status、分頁 headers 與 JSON body。",
+        "以 GET 讀取網頁版 API（例如交易、發票、帳單、分類規則、排程與同步狀態），只讀不寫；端點與 query 格式見 list_api_endpoints。回傳 status、分頁 headers 與 JSON body；回應過大時回傳 RESPONSE_TOO_LARGE 而不含內容，請以 limit、cursor 分頁或縮小月份範圍。",
       inputSchema: z.object({ path: pathSchema, query: querySchema }),
       annotations: READ_ONLY,
     },
@@ -214,7 +338,7 @@ function createServer(
     "call_api",
     {
       description:
-        "以 POST、PUT、PATCH、DELETE 呼叫網頁版 API，編輯資料（分類、規則、手動資產、扣款帳戶、排程、通知、資料來源設定等）或觸發同步；端點與 body 格式見 list_api_endpoints。會直接變更資料，執行前請向使用者確認；讀取請改用 query_api。回傳 status、分頁 headers 與 JSON body。",
+        "以 POST、PUT、PATCH、DELETE 呼叫網頁版 API，編輯資料（分類、規則、手動資產、扣款帳戶、排程、通知、資料來源設定等）；同步請改用 sync_sources。端點與 body 格式見 list_api_endpoints。會直接變更資料，執行前請向使用者確認；讀取請改用 query_api。回傳 status、分頁 headers 與 JSON body。",
       inputSchema: z.object({
         method: z.enum(WRITE_API_METHODS),
         path: pathSchema,
@@ -242,9 +366,10 @@ function createServer(
         apiContext.executionCtx,
         input,
       );
+      const { text, tooLarge } = serializeApiResult(input.method, result);
       return {
-        isError: result.status >= 400,
-        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+        isError: tooLarge || result.status >= 400,
+        content: [{ type: "text" as const, text }],
       };
     } catch (error) {
       const safeError = sanitizeDatabaseError(error);

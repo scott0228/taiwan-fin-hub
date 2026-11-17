@@ -25,6 +25,8 @@ export interface ActivityItem {
     | "fallback";
   classificationRuleId?: string;
   transactionId?: string;
+  /** 手動記錄的現金收支，可由使用者刪除。 */
+  manual?: boolean;
   /** 使用者為銀行／信用卡交易寫的備註。 */
   note?: string;
   excludedFromCalculation?: boolean;
@@ -32,5 +34,19 @@ export interface ActivityItem {
   refund?: boolean;
   invoiceId?: string;
   invoiceAmount?: number;
+  /** 這筆銀行交易是交割款時，配對到的證券成交；該成交不再另列一筆投資活動。 */
+  trade?: ActivityItemTrade;
   status: string;
+}
+
+export interface ActivityItemTrade {
+  id: string;
+  name: string;
+  symbol?: string;
+  /** 成交日，YYYY-MM-DD。 */
+  date: string;
+  /** 買賣別名稱，例如「買進」。 */
+  side?: string;
+  quantity?: number;
+  price?: number;
 }

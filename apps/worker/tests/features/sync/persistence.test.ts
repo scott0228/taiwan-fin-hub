@@ -23,6 +23,8 @@ import { prepareTaishinAuthorizationWrite } from "../../../src/sources/taishin/a
 import { prepareEsunAuthorizationWrite } from "../../../src/sources/esun/authorizations";
 import { prepareSinopacAuthorizationWrite } from "../../../src/sources/sinopac/authorizations";
 import { prepareCtbcAuthorizationWrite } from "../../../src/sources/ctbc/authorizations";
+import { parseNextbankMainAccount } from "../../../src/sources/nextbank/protocol";
+import { prepareNextbankTransactionWrite } from "../../../src/sources/nextbank/transactions";
 import { prepareCardAuthorizationWrite } from "../../../src/features/sync/card-authorization-write";
 import { parseFirstbankData } from "../../../src/sources/firstbank/protocol";
 import { parseHncbData } from "../../../src/sources/hncb/protocol";
@@ -519,6 +521,68 @@ describe("同步資料完整性（隔離 D1）", () => {
       expect(row).not.toHaveProperty("cardLast4");
       expect(row).not.toHaveProperty("cardName");
     }
+  });
+
+  it("bank API 帶月份區間分頁時只回該月交易，且各頁不重複、不遺漏", async () => {
+    const accountId = "credit:ctbc:TWD";
+    const account = bankAccountRecord(
+      "ctbc",
+      {
+        sourceId: accountId,
+        institutionName: "中國信託商業銀行",
+        accountName: "中國信託信用卡",
+        accountType: "credit",
+        currency: "TWD",
+      },
+      now,
+    );
+    const transaction = (sourceId: string, postedDate: string) =>
+      bankTransactionRecord(
+        "ctbc",
+        {
+          accountId,
+          sourceId,
+          postedDate,
+          amount: -100,
+          currency: "TWD",
+          description: sourceId,
+          status: "posted",
+        },
+        now,
+      );
+    await persistStagedSyncWrite(db, {
+      records: [
+        account,
+        transaction("oct-1", "2026-10-01"),
+        transaction("sep-30", "2026-09-30"),
+        transaction("sep-15", "2026-09-15"),
+        transaction("sep-01", "2026-09-01"),
+        transaction("aug-31", "2026-08-31"),
+      ],
+    });
+    const range = { from: "2026-09-01", to: "2026-10-01" };
+
+    const first = await getBankPage(db, 2, undefined, range);
+    expect(first.transactions.map((row) => row.description)).toEqual([
+      "sep-30",
+      "sep-15",
+    ]);
+    expect(first.hasMore).toBe(true);
+
+    const second = await getBankPage(
+      db,
+      2,
+      {
+        effectiveDate: first.last!.effectiveDate,
+        updatedAt: first.last!.updatedAt,
+        id: first.last!.id,
+      },
+      range,
+    );
+    expect(second.transactions.map((row) => row.description)).toEqual([
+      "sep-01",
+    ]);
+    expect(second.hasMore).toBe(false);
   });
 
   it("貸款資料缺值時保留既有非空類別、利率、開戶日與繳款欄位", async () => {
@@ -1552,6 +1616,257 @@ describe("同步資料完整性（隔離 D1）", () => {
       ).toEqual([]);
     },
   );
+
+  it.each(["結帳後首次回傳", "已留下重複列", "帳單缺消費日"])(
+    "中信無授權碼明細由未出帳改為帳單回傳（%s）時合併為原列，仍在回傳的同額明細不合併",
+    async (scenario) => {
+      const sourceId = "credit:ctbc:main";
+      const card = bankAccountRecord(
+        "ctbc",
+        { sourceId, accountType: "credit", currency: "TWD" },
+        now,
+      );
+      const make = (
+        identity: string,
+        description = "電子支付繳",
+        cardLast4 = "1234",
+      ) =>
+        bankTransactionRecord(
+          "ctbc",
+          {
+            accountId: sourceId,
+            sourceId: `ctbc:card:tx:${identity}:1`,
+            authorizedAt:
+              scenario === "帳單缺消費日" && identity === "statement"
+                ? undefined
+                : "2026-10-05",
+            postedDate: "2026-10-05",
+            status: "posted",
+            amount: 3320,
+            currency: "TWD",
+            description,
+            raw: { cardLast4 },
+          },
+          now,
+        );
+      const unbilled = make("unbilled");
+      const statement = make("statement");
+      const write = async (records: SyncWriteRecord[]) =>
+        persistStagedSyncWrite(
+          db,
+          await prepareCtbcAuthorizationWrite(db, records),
+        );
+      await write([card, unbilled]);
+      await db
+        .prepare(
+          "INSERT INTO classification_overrides VALUES ('ctbc-payment', 'bank_transaction', ?, 'food', 't', 't')",
+        )
+        .bind(unbilled.recordKey)
+        .run();
+      if (scenario === "已留下重複列")
+        await persistStagedSyncWrite(db, { records: [statement] });
+      for (let sync = 0; sync < 2; sync++) {
+        await write([statement]);
+        expect(
+          (
+            await db
+              .prepare(
+                "SELECT id, amount, status FROM bank_transactions WHERE connector_id = 'ctbc'",
+              )
+              .all()
+          ).results,
+        ).toEqual([{ id: unbilled.recordKey, amount: 3320, status: "posted" }]);
+      }
+      expect(
+        await db
+          .prepare(
+            "SELECT target_id FROM classification_overrides WHERE id = 'ctbc-payment'",
+          )
+          .first("target_id"),
+      ).toBe(unbilled.recordKey);
+      // A second identical payment still returned by the unbilled feed is a
+      // separate transaction, and a different description never merges.
+      const second = make("unbilled-second");
+      await write([statement, second]);
+      await write([statement, second, make("fee", "年費")]);
+      expect(await listBankTransactions(db, 20)).toHaveLength(3);
+      // Counterparts are found by card, not by position in the response.
+      const cards = ["1111", "2222"];
+      await write(cards.map((card) => make(`old-${card}`, "循環利息", card)));
+      await write(
+        [...cards]
+          .reverse()
+          .map((card) => make(`new-${card}`, "循環利息", card)),
+      );
+      expect(
+        (
+          await db
+            .prepare(
+              "SELECT id FROM bank_transactions WHERE description = '循環利息' ORDER BY json_extract(raw_payload, '$.cardLast4')",
+            )
+            .all()
+        ).results,
+      ).toEqual(
+        cards.map((card) => ({
+          id: make(`old-${card}`, "循環利息", card).recordKey,
+        })),
+      );
+      // A row that could also belong to a returned row outside the group is
+      // not merged by count alone.
+      await write(
+        ["3333", ""].map((card) => make(`a-${card}`, "手續費", card)),
+      );
+      await write(
+        ["3333", "3333", "4444"].map((card, index) =>
+          make(`b-${index}`, "手續費", card),
+        ),
+      );
+      expect(
+        await db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM bank_transactions WHERE description = '手續費'",
+          )
+          .first("count"),
+      ).toBe(5);
+      expect(
+        (await db.prepare("PRAGMA foreign_key_check").all()).results,
+      ).toEqual([]);
+    },
+  );
+
+  it("將來銀行 tradeID 重新編號不新增交易，舊識別留下的重複列併回並保留設定與時間", async () => {
+    const trade = (
+      tradeID: number,
+      time: string,
+      amount: number,
+      tradeChannel = "PXPAY-P",
+    ) => ({
+      tradeID,
+      tradeAmount: amount,
+      tradeDateTime: time,
+      tradeChannel,
+      detail: { summary: "儲值付款" },
+    });
+    const parse = (...months: unknown[][]) =>
+      parseNextbankMainAccount(
+        {
+          mainAccount: {
+            accountId: "00012345672730",
+            workingBalance: 5000,
+            availableBalance: 5000,
+          },
+        },
+        months.map((trades) => ({ trades })),
+        new Date("2026-11-13T08:00:00+08:00"),
+      );
+    const write = async (data: ReturnType<typeof parse>) => {
+      const prepared = await prepareNextbankTransactionWrite(db, [
+        ...data.bankAccounts.map((account) =>
+          bankAccountRecord("nextbank", account, now),
+        ),
+        ...data.bankTransactions.map((transaction) =>
+          bankTransactionRecord("nextbank", transaction, now),
+        ),
+      ]);
+      await persistStagedSyncWrite(db, prepared);
+    };
+    const rows = async () =>
+      (
+        await db
+          .prepare(
+            "SELECT id, authorized_at, amount, status FROM bank_transactions WHERE connector_id = 'nextbank' ORDER BY authorized_at, amount",
+          )
+          .all<{ id: string; authorized_at: string; amount: number }>()
+      ).results;
+    // Rows written by the tradeID-based identity: one trade stored three
+    // times, the first while it was still an authorization with a time.
+    const first = parse([trade(1, "2026-11-03 13:56:31", -916)]);
+    const account = first.bankAccounts[0]!;
+    const legacy = (identity: string, authorizedAt: string, date: string) =>
+      bankTransactionRecord(
+        "nextbank",
+        {
+          accountId: account.sourceId,
+          sourceId: `nextbank:tx:${identity}`,
+          authorizedAt,
+          postedDate: authorizedAt.slice(0, 10),
+          amount: -916,
+          currency: "TWD",
+          status: "posted",
+        },
+        date,
+      );
+    const original = legacy(
+      "legacy-1",
+      "2026-11-03T13:56:31+08:00",
+      "2026-11-04T08:00:00+08:00",
+    );
+    const outside = legacy(
+      "legacy-old",
+      "2026-07-03",
+      "2026-07-04T08:00:00+08:00",
+    );
+    await persistStagedSyncWrite(db, {
+      records: [
+        bankAccountRecord("nextbank", account, now),
+        original,
+        legacy("legacy-2", "2026-11-03", "2026-11-10T08:00:00+08:00"),
+        legacy("legacy-3", "2026-11-03", "2026-11-11T08:00:00+08:00"),
+        outside,
+      ],
+    });
+    await db
+      .prepare(
+        "INSERT INTO classification_overrides VALUES ('nextbank-category', 'bank_transaction', ?, 'food', 't', 't')",
+      )
+      .bind(original.recordKey)
+      .run();
+    // The posted trade now arrives date-only.
+    await write(parse([trade(1, "2026-11-03", -916)]));
+    const merged = await rows();
+    expect(merged.map((row) => [row.authorized_at, row.amount])).toEqual([
+      ["2026-07-03", -916],
+      ["2026-11-03T13:56:31+08:00", -916],
+    ]);
+    expect(merged[0]!.id).toBe(outside.recordKey);
+    expect(
+      await db
+        .prepare(
+          "SELECT target_id FROM classification_overrides WHERE category_id = 'food'",
+        )
+        .first("target_id"),
+    ).toBe(merged[1]!.id);
+    // Newer trades renumber the earlier one; a same-day same-amount trade is
+    // still a second transaction.
+    for (let sync = 0; sync < 2; sync++)
+      await write(
+        parse([
+          trade(1, "2026-11-09 21:35:17", -27),
+          trade(2, "2026-11-09 13:05:30", -916),
+          trade(3, "2026-11-09 13:05:12", 2000, "TRANSFERIN"),
+          trade(4, "2026-11-03 18:00:00", -916),
+          trade(5, "2026-11-03", -916),
+          // The same listing repeated in the responses is one transaction.
+          trade(5, "2026-11-03 13:56:31", -916, "UNBILLED"),
+        ]),
+      );
+    expect(
+      parse([
+        trade(5, "2026-11-03", -916),
+        trade(5, "2026-11-03 13:56:31", -916, "UNBILLED"),
+      ]).bankTransactions,
+    ).toMatchObject([
+      { status: "posted", authorizedAt: "2026-11-03T13:56:31+08:00" },
+    ]);
+    const final = await rows();
+    expect(final).toHaveLength(6);
+    expect(final.find((row) => row.id === merged[1]!.id)).toMatchObject({
+      authorized_at: "2026-11-03T13:56:31+08:00",
+    });
+    expect(
+      (await db.prepare("PRAGMA foreign_key_check").all()).results,
+    ).toEqual([]);
+  });
 
   it("中信兩端都已連結發票時保留原交易與決定，不刪除衝突；配對準備後才新增的衝突使 batch 回滾", async () => {
     const sourceId = "credit:ctbc:main";

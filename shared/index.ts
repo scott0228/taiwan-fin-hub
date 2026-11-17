@@ -6,6 +6,7 @@ export * from "./api/bank";
 export * from "./api/classification";
 export * from "./api/connectors";
 export * from "./api/dashboard";
+export * from "./api/manual-transactions";
 export * from "./api/notifications";
 export * from "./api/sync";
 export * from "./api/sync-reports";
@@ -22,6 +23,7 @@ export {
   invoiceTransactionDayGap,
   isManualInvoiceMatchCandidate,
   MANUAL_INVOICE_MATCH_MAX_DAYS,
+  TRADE_SETTLEMENT_MAX_DAYS,
   type InvoiceTransactionMatches,
   type InvoiceTransactionPreference,
 } from "./activity/matching";

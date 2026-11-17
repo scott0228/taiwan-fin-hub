@@ -4,6 +4,7 @@ import { decryptJson, encryptJson } from "../../../src/platform/crypto";
 import { getConnectorSettings } from "../../../src/db";
 import type { Env } from "../../../src/platform/env";
 import { syncSinotrade } from "../../../src/sources/sinotrade/sync";
+import { SinotradeUnattendedLoginError } from "../../../src/sources/sinotrade/session-protocol";
 
 const mocked = vi.hoisted(() => ({ fetchSnapshot: vi.fn() }));
 vi.mock("../../../src/sources/sinotrade/connector", () => ({
@@ -231,5 +232,106 @@ describe("證券完整持倉同步（隔離 D1）", () => {
         "SELECT realized_pnl FROM investment_transactions WHERE connector_id='sinotrade' AND transaction_code='S'",
       ).first("realized_pnl"),
     ).toBeNull();
+  });
+
+  it("自動重新登入未完成時把該平台標記為未連線，保留帳密、憑證與另一平台", async () => {
+    const state = {
+      authenticated: true,
+      cookies: [],
+      localStorage: { TWCACertIdxRef: '{"TWCA1":1}', TWCA1: "fixture-cert" },
+      capturedAt: "2027-01-01T00:00:00.000Z",
+    };
+    const stored = {
+      ...credentials,
+      webState: { newweb: state, savings: state },
+    };
+    await env.DB.prepare(
+      "UPDATE connector_settings SET encrypted_config = ? WHERE connector_id='sinotrade'",
+    )
+      .bind(await encryptJson(stored, key))
+      .run();
+    const saved = async () =>
+      decryptJson(
+        (await getConnectorSettings(env.DB, "sinotrade"))!.encrypted_config,
+        key,
+      );
+
+    // 其他失敗不改變連線狀態，下一次同步照常重試。
+    mocked.fetchSnapshot.mockRejectedValueOnce(new Error("來源查詢失敗"));
+    await expect(syncSinotrade(env, "manual")).rejects.toThrow("來源查詢失敗");
+    expect(await saved()).toEqual(stored);
+
+    mocked.fetchSnapshot.mockRejectedValueOnce(
+      new SinotradeUnattendedLoginError("savings", "otp"),
+    );
+    await expect(syncSinotrade(env, "manual")).rejects.toBeInstanceOf(
+      SinotradeUnattendedLoginError,
+    );
+    expect(await saved()).toEqual({
+      ...credentials,
+      webState: {
+        newweb: state,
+        savings: { ...state, authenticated: false },
+      },
+    });
+  });
+
+  it("台股與美股市值分別寫入股票走勢：美股以同步當下匯率換算，賣光寫 0，缺匯率不寫", async () => {
+    const twAccount = { ...account, brokerAccount: "0000009", market: "TW" };
+    const twHolding = {
+      ...holding,
+      symbol: "0050",
+      quantity: 1000,
+      marketValue: 100_000,
+      currency: "TWD",
+      market: "TW" as const,
+    };
+    const history = async () =>
+      (
+        await env.DB.prepare(
+          "SELECT asset_type, net_worth FROM net_worth_history WHERE source='sinotrade' ORDER BY asset_type",
+        ).all<{ asset_type: string; net_worth: number }>()
+      ).results;
+    const usHolding = { ...holding, marketValue: 1000.4 };
+
+    await env.DB.prepare("DELETE FROM net_worth_history").run();
+    // 沒有 USD 匯率：美股不得以 0 或原幣寫入；台股不需匯率照常寫。
+    mocked.fetchSnapshot.mockResolvedValue({
+      accountHoldings: [
+        { account, holdings: [usHolding], trades: [] },
+        { account: twAccount, holdings: [twHolding], trades: [] },
+      ],
+      webState: {},
+    });
+    await syncSinotrade(env, "manual");
+    expect(await history()).toEqual([
+      { asset_type: "tw_stock", net_worth: 100_000 },
+    ]);
+
+    // 1000.4 × 32 = 32012.8 → 32013；台股另存 tw_stock，由走勢查詢與集保合併。
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO exchange_rates (currency, rate_to_twd, updated_at) VALUES ('USD', 32, ?)",
+    )
+      .bind(new Date().toISOString())
+      .run();
+    await syncSinotrade(env, "manual");
+    expect(await history()).toEqual([
+      { asset_type: "stock", net_worth: 32_013 },
+      { asset_type: "tw_stock", net_worth: 100_000 },
+    ]);
+
+    // 同日全數賣出：覆寫為 0，不沿用舊市值。
+    mocked.fetchSnapshot.mockResolvedValue({
+      accountHoldings: [
+        { account, holdings: [], trades: [] },
+        { account: twAccount, holdings: [], trades: [] },
+      ],
+      webState: {},
+    });
+    await syncSinotrade(env, "manual");
+    expect(await history()).toEqual([
+      { asset_type: "stock", net_worth: 0 },
+      { asset_type: "tw_stock", net_worth: 0 },
+    ]);
   });
 });
