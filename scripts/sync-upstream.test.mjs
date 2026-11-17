@@ -234,6 +234,46 @@ test("先前同步後的非衝突使用者修改會保留，且不引入上游 p
   });
 });
 
+test("同步紀錄後手動合併上游時，改用較新的共同 Git 歷史作為合併基準", () => {
+  withTemporaryRepository((root) => {
+    const upstream = createUpstream(root, { includeSecondCommit: false });
+    const originBare = path.join(root, "deployment.git");
+    initializeBareRepository(originBare);
+    git(upstream.worktree, "remote", "add", "deployment", originBare);
+    git(upstream.worktree, "push", "deployment", "main");
+
+    const runner = path.join(root, "runner");
+    cloneRepository(originBare, runner);
+
+    write(upstream.worktree, "app.txt", "version 2\n");
+    commitAll(upstream.worktree, "upstream v2");
+    git(upstream.worktree, "push", "origin", "main");
+    const firstSync = runUpdater(runner, upstream.bare);
+    assert.equal(firstSync.status, 0, firstSync.stderr);
+
+    write(upstream.worktree, "manual.txt", "v3\n");
+    const upstreamV3 = commitAll(upstream.worktree, "upstream v3");
+    git(upstream.worktree, "push", "origin", "main");
+    git(runner, "fetch", "upstream");
+    git(runner, "merge", "--no-edit", "upstream/main");
+    git(runner, "push", "origin", "main");
+
+    write(upstream.worktree, "manual.txt", "v4\n");
+    const upstreamV4 = commitAll(upstream.worktree, "upstream v4");
+    git(upstream.worktree, "push", "origin", "main");
+
+    const result = runUpdater(runner, upstream.bare);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(upstreamV3));
+    assert.equal(git(runner, "show", "HEAD:manual.txt"), "v4");
+    assert.match(
+      git(runner, "show", "-s", "--format=%B", "HEAD"),
+      new RegExp(`Taiwan-Fin-Hub-Upstream: ${upstreamV4}`),
+    );
+  });
+});
+
 test("獨立部署辨識匯入與同步版本，自行新增 commit 後顯示未知", () => {
   withTemporaryRepository((root) => {
     const upstream = createUpstream(root);

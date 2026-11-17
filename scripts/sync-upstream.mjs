@@ -364,16 +364,26 @@ function syncUpstream() {
 
   const before = gitText(["rev-parse", "HEAD"]);
   const upstreamCommit = gitText(["rev-parse", upstreamRef]);
-  let baseline = findRecordedUpstreamCommit(upstreamRef);
+  const recordedBaseline = findRecordedUpstreamCommit(upstreamRef);
+  const historyBaseline = mergeBase("HEAD", upstreamRef);
+  let baseline;
   let requiresBaselineRecord = false;
 
-  if (baseline) {
+  // 同步紀錄之後若曾手動 merge 上游，共同 Git 歷史會比紀錄更新；
+  // 沿用舊紀錄會把已合併的上游變更重新套用一次而產生衝突。
+  if (
+    recordedBaseline &&
+    !(
+      historyBaseline &&
+      historyBaseline !== recordedBaseline &&
+      isAncestor(recordedBaseline, historyBaseline)
+    )
+  ) {
+    baseline = recordedBaseline;
     console.log(`使用先前同步紀錄 ${baseline} 作為三方合併基準。`);
-  } else {
-    baseline = mergeBase("HEAD", upstreamRef);
-    if (baseline) {
-      console.log(`使用共同 Git 歷史 ${baseline} 作為三方合併基準。`);
-    }
+  } else if (historyBaseline) {
+    baseline = historyBaseline;
+    console.log(`使用共同 Git 歷史 ${baseline} 作為三方合併基準。`);
   }
 
   if (!baseline) {

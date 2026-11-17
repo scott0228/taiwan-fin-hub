@@ -199,7 +199,7 @@ git push
 workflow 會：
 
 1. 取得 `TedLin1993/all-set-tw` 的最新 `main`。
-2. 以前次同步版本為基準進行三方合併。
+2. 以前次同步版本為基準進行三方合併；若之後曾手動 merge 上游，改用較新的共同 Git history。
 3. 保留部署 repository 自己的 `.github/workflows`。
 4. 有新版本時推送至 `main`，由 Workers Builds 重新部署。
 
