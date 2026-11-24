@@ -130,6 +130,8 @@ const ENDPOINT_NOTES: Record<string, string> = {
     "資料來源設定狀態（不含帳密）。connectorId 見 connectors。",
   "PUT /connectors/:connectorId/settings":
     "儲存資料來源設定。body：config（物件，帳密欄位見 connectors 的 credentialFields）。",
+  "POST /connectors/:connectorId/trusted-device":
+    "登記集保已信任裝置以略過 OTP，僅支援 tdcc。body：deviceId、devType、devModel?。須先設定集保帳密，通常由使用者手動操作。",
   "POST /connectors/einvoice/sync": "開始電子發票同步（Queue 背景執行）。",
   "POST /connectors/tdcc/sync":
     "開始集保同步（Queue 背景執行）。body：otp?、otpChannel?（email、sms）。",

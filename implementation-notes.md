@@ -57,3 +57,30 @@ App 擷取的值)寫入集保 connector 設定,之後同步可重用該信任裝
 
 - 是否要加前端欄位/按鈕觸發此端點?目前僅 API。
 - 是否需要在 `getConnectorSettingsView` 回傳「已設定信任裝置」狀態供前端顯示?
+
+## 上游同步衝突處理（upstream dbf7e74）
+
+排程同步以紀錄基準 `5619d9a` 三方合併上游 `dbf7e74` 時，在
+`scripts/deploy-with-vapid.test.mjs`（content）與
+`scripts/prepare-cloudflare-build.mjs`（modify/delete）衝突而停止。
+
+### 處理方式
+
+- 以真實 merge commit 合併上游（內容為同步腳本相同基準的三方合併結果），使
+  `scripts/sync-upstream.mjs` 下次改用較新的共同 Git 歷史作為基準。
+- 兩個衝突檔一律採上游版本：刪除 `prepare-cloudflare-build.mjs`，測試檔改用上游版。
+- 一併移除 fork 自訂、已無引用的 `applyRemoteMigrations`；`deploy-with-vapid.mjs`
+  與上游一致。
+
+### 設計決策
+
+- fork 原本（84a62f0）在 Workers Builds 的 prebuild 套用 D1 migrations。上游改為
+  Deploy command `npm run deploy` 執行 `deploy-with-vapid.mjs --migrate`，在部署前
+  依正式 Worker 的 DB 綁定套用 migrations，涵蓋原需求，故放棄 fork 版本。
+- 上游新增「每個 /api 端點都要有 MCP 說明」測試；為 fork 的
+  `POST /connectors/:connectorId/trusted-device` 補上 `ENDPOINT_NOTES`。
+
+### Open questions
+
+- 請確認 Cloudflare Worker → Settings → Builds 的 **Deploy command** 為
+  `npm run deploy`；若仍為 `npx wrangler deploy`，合併後不會自動套用 migrations。

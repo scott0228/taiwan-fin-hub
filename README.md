@@ -12,13 +12,13 @@
 
 - **財務總覽**：一頁查看淨資產、歷史趨勢與本月收支。
 - **帳戶與投資整合**：依機構集中查看存款、信用卡、貸款，以及股票、ETF、基金與加密貨幣持倉。
-- **收支分析**：銀行、刷卡、投資與發票紀錄整理成同一條時間軸，可搜尋與篩選；銀行與信用卡交易可加上備註，例如記下轉帳或扣款的用途。
+- **收支分析**：銀行、刷卡、投資與發票紀錄整理成同一條時間軸，可搜尋與篩選；在「搜尋所有活動」輸入發票品名，會逐項顯示品名、數量與發票小計，並在下方列出活動總額。銀行與信用卡交易可加上備註，例如記下轉帳或扣款的用途。
 - **發票與交易配對**：電子發票與刷卡、轉帳交易合併顯示，不會重複計入支出。
 - **自動分類**：可用 AI 將消費自動歸入餐飲、交通、購物、醫療等類別，也能自訂分類規則或手動修正。
 - **其他資產**：手動記錄不動產、保險、交通工具等估值，一併計入淨資產。
 - **現金收支**：銀行與發票抓不到的現金花費，可以直接告訴 AI 助理代為記錄，現金餘額計入淨資產；提款與現金支出不會重複計算。
 - **排程同步**：定時自動同步，並查看每次新增的紀錄與資產變化。
-- **繳款提醒**：總覽與推播提醒 5 天內要繳的信用卡與貸款；可設定扣款帳戶，餘額足夠時不提醒，不足時優先提醒。
+- **繳款提醒**：總覽與推播提醒 3 天內要繳的信用卡與貸款；可設定扣款帳戶，餘額足夠時不提醒，不足時優先提醒。
 - **手機與推播**：可加入手機主畫面，推播同步結果、信用卡與貸款繳款提醒，以及當天到期的定存。
 - **AI 助理連線**：透過 MCP 讓 Codex、ChatGPT 等 AI 助理查詢淨資產、收支、持倉與繳款提醒，也能編輯分類與設定、觸發同步、記錄現金收支；網頁版「設定 → AI 助理」提供這個部署的連線網址與可複製的指令，完整設定見 [AI 助理連線（MCP）](docs/006-mcp.md)。
 
@@ -164,13 +164,13 @@ curl -X POST https://<你的網域>/api/connectors/tdcc/trusted-device \
 
 首次使用時，依畫面透過 **Git account → New Github Connection → Install & Authorize** 授權 Cloudflare 存取 GitHub。
 
-資源名稱可保留預填值。關閉 **Enable Preview builds**，再開啟 **Protect with Cloudflare Access**，設定：
+確認 **Deploy command** 為 `npm run deploy`，關閉 **Enable Preview builds**，再開啟 **Protect with Cloudflare Access**，設定：
 
 - **Scope：All traffic**，保護正式與預覽部署
 - **Authentication policy：Cloudflare account**，限定你的 Cloudflare 帳戶成員登入
 - **Session duration**：可保留預設 **24 hours**；想延長可選 **7 days**
 
-<img src="images/deploy-access-on-create.png" alt="部署頁開啟 Cloudflare Access，選擇 All traffic 與 Cloudflare account" width="700">
+<img src="images/deploy-access-on-create.png" alt="部署指令為 npm run deploy，Preview builds 已關閉，Access 套用至 All traffic 並選擇 Cloudflare account" width="700">
 
 確認後點擊 **Deploy**，頁面會自動跳轉至 **Builds**。登入驗證設定會自動取得，後續更新也會沿用。
 
@@ -182,44 +182,11 @@ curl -X POST https://<你的網域>/api/connectors/tdcc/trusted-device \
 
 <a href="images/deploy-success.png"><img src="images/deploy-success.png" alt="Cloudflare build 成功畫面與右上角的 Visit 按鈕" width="700"></a>
 
-### 延長登入期限（選用）
-
-部署頁的 **Session duration** 最多可選 **7 days**。若要延長至一個月，部署完成後前往 **Cloudflare One／Zero Trust → Access controls → Applications**，找到保護此 Worker 的 Application：
-
-若頁面顯示 **Finish your account setup**，先點擊 **Choose a plan**，完成 **Zero Trust Free** 方案設定。
-
-1. 點擊該 Application 的 **Configure**，開啟 **Application details**。
-2. 點擊頁面上方與 **All、Destinations、Policies** 同一排的 **Details** 按鈕，或直接向下捲到頁面最下方。
-3. 在 **Details** 區塊的 **Name** 欄位旁，將 **Session Duration** 設為 **1 month**，再點擊 **Save**。
-
-後續自動部署與更新會沿用這些登入設定。
-
-部署與登入故障排查，以及版本更新方式（含較早部署的一次性切換），請參考[進階部署與更新](docs/005-deployment.md)。
+部署後可[延長登入期限](docs/005-deployment.md#延長登入期限)。登入遇到問題或需要更新版本時，請參考[進階部署與更新](docs/005-deployment.md)。
 
 ## 本機開發
 
-建立不納入版本控制的私人設定，將 `wrangler.local.toml` 的 D1 Database ID 換成開發用資料庫，並在 `.dev.vars` 設定自己的 `CONFIG_ENCRYPTION_KEY`：
-
-```bash
-cp apps/worker/wrangler.local.toml.example apps/worker/wrangler.local.toml
-cp apps/worker/.dev.vars.example apps/worker/.dev.vars
-npm install
-npx wrangler login
-npm run dev
-```
-
-範例設定的 D1 與 Workers AI 會連到 Cloudflare remote binding，請勿使用正式資料庫。常用驗證指令：
-
-```bash
-npm run format:check
-npm run lint
-npm run typecheck
-npm run verify:web
-npm run test:backend
-npm run build
-```
-
-本機 relay、資料庫遷移與既有 D1 部署方式請參考[進階部署與更新](docs/005-deployment.md)。
+請依[本機開發指南](docs/005-deployment.md#本機開發)建立私人設定、指定開發用 D1 並啟動服務。提交變更前請見[專案驗證指令](AGENTS.md#提交與-pr-前必跑檢查)。
 
 ## 技術架構
 
@@ -227,11 +194,7 @@ npm run build
 
 後端執行於 Cloudflare Workers，以 Hono 提供 API，並整合 D1、Access、Browser Run、Workers AI、Cron Triggers 與 Queues。
 
-專案以 npm workspaces 管理 `apps/web`、`apps/worker` 與根目錄的 `shared/`。`shared/` 以 `@taiwan-fin-hub/shared` 提供前後端共用的型別、契約與純邏輯。資料庫程式位於 `apps/worker/src/db`，SQL migrations 位於 `apps/worker/migrations`；各銀行、集保與電子發票的同步、connector、API client 及資料解析集中於 `apps/worker/src/sources/<connectorId>`，共用同步管理位於 `apps/worker/src/features/sync`。
-
-前後端與共用套件皆使用 TypeScript 7 型別檢查；Svelte 前端透過 `svelte-check --tsgo` 執行，並保留工具所需的 TypeScript 6 相依。
-
-詳細設計請參考[後端架構](docs/002-backend-architecture.md)、[前端架構](docs/003-frontend-architecture.md)與[連接器開發](docs/004-connector-development.md)。
+程式結構與開發約定請參考[後端架構](docs/002-backend-architecture.md)、[前端架構](docs/003-frontend-architecture.md)與[連接器開發](docs/004-connector-development.md)。
 
 ## 安全機制
 
